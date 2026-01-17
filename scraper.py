@@ -1,0 +1,273 @@
+import asyncio
+import aiohttp
+from bs4 import BeautifulSoup
+import re
+from urllib.parse import urljoin
+from typing import List, Dict, Any, Optional
+from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS
+from utils import (
+    generate_uuid, clean_text, extract_price, extract_sizes,
+    determine_category, determine_gender, is_in_stock, get_image_url,
+    setup_session, sync_fetch_url
+)
+from embedding import generate_image_embedding
+from database import get_db_manager
+import logging
+from tqdm import tqdm
+import time
+
+logger = logging.getLogger(__name__)
+
+class AboutBlankScraper:
+    def __init__(self):
+        self.db_manager = get_db_manager()
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        self.existing_urls = self.db_manager.get_existing_product_urls("scraper")
+
+    async def discover_product_urls(self) -> List[str]:
+        """Discover all product URLs from the shop-all collection"""
+        logger.info("Starting product URL discovery...")
+
+        product_urls = set()
+        page = 1
+
+        while True:
+            url = f"{SHOP_ALL_URL}?page={page}" if page > 1 else SHOP_ALL_URL
+            logger.info(f"Fetching page {page}: {url}")
+
+            html = sync_fetch_url(url)
+            if not html:
+                break
+
+            soup = BeautifulSoup(html, 'lxml')
+            products_found_on_page = 0
+
+            # Find product links
+            product_links = soup.find_all('a', href=re.compile(r'/products/'))
+            logger.info(f"Found {len(product_links)} links with '/products/' on page {page}")
+
+            for link in product_links:
+                href = link.get('href')
+                if href and '/products/' in href:
+                    # Clean up the URL
+                    if href.startswith('/'):
+                        full_url = urljoin(BASE_URL, href)
+                    else:
+                        full_url = href
+
+                    # Remove any query parameters or fragments
+                    full_url = full_url.split('?')[0].split('#')[0]
+
+                    # Only add if not already in database
+                    if full_url not in self.existing_urls:
+                        product_urls.add(full_url)
+                        products_found_on_page += 1
+                        logger.debug(f"Added new URL: {full_url}")
+                    else:
+                        logger.debug(f"URL already exists: {full_url}")
+
+            logger.info(f"Found {products_found_on_page} new products on page {page}")
+
+            # Check if there's a next page
+            next_page = soup.find('a', string=re.compile(r'next|Next|NEXT', re.I))
+            if not next_page or products_found_on_page == 0:
+                if page > 1 and products_found_on_page == 0:
+                    logger.info("No more products found, stopping discovery")
+                break
+
+            page += 1
+
+            # Rate limiting
+            await asyncio.sleep(1 / REQUESTS_PER_SECOND)
+
+            # Safety break after 50 pages
+            if page > 50:
+                logger.warning("Reached page limit (50), stopping discovery")
+                break
+
+        logger.info(f"Discovered {len(product_urls)} new product URLs")
+        return list(product_urls)
+
+    async def scrape_product(self, session: aiohttp.ClientSession, url: str) -> Optional[Dict[str, Any]]:
+        """Scrape individual product page"""
+        async with self.semaphore:
+            try:
+                response = await session.get(url)
+                response.raise_for_status()
+                html = await response.text()
+                soup = BeautifulSoup(html, 'lxml')
+
+                # Check if in stock
+                if not is_in_stock(soup):
+                    logger.info(f"Skipping out of stock product: {url}")
+                    return None
+
+                # Extract basic product info
+                title = self._extract_title(soup)
+                if not title:
+                    logger.warning(f"Could not extract title for {url}")
+                    return None
+
+                description = self._extract_description(soup)
+                price = self._extract_price(soup)
+                image_url = get_image_url(soup)
+                sizes = extract_sizes(soup)
+                collection = self._extract_collection(url)
+
+                # Determine category and gender
+                category = determine_category(collection, title)
+                gender = determine_gender(category)
+
+                # Generate embedding if image exists
+                embedding = None
+                if image_url:
+                    logger.info(f"Generating embedding for {title}")
+                    embedding = await generate_image_embedding(image_url)
+
+                # Create product data
+                product_data = {
+                    'id': generate_uuid(),
+                    'source': 'scraper',
+                    'product_url': url,
+                    'image_url': image_url,
+                    'brand': 'About Blank',
+                    'title': title,
+                    'description': description,
+                    'category': category,
+                    'gender': gender,
+                    'price': price,
+                    'currency': 'USD',
+                    'size': ','.join(sizes) if sizes else None,
+                    'second_hand': False,
+                    'embedding': embedding,
+                    'country': 'US',
+                    'tags': self._extract_tags(collection, category)
+                }
+
+                return product_data
+
+            except Exception as e:
+                logger.error(f"Error scraping product {url}: {e}")
+                return None
+
+    def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract product title"""
+        selectors = [
+            'h1.product-title',
+            '.product-title h1',
+            'h1[data-product-title]',
+            '.product-name',
+            'h1'
+        ]
+
+        for selector in selectors:
+            title_elem = soup.select_one(selector)
+            if title_elem:
+                return clean_text(title_elem.get_text())
+
+        # Fallback: look in meta tags
+        meta_title = soup.find('meta', {'property': 'og:title'})
+        if meta_title and meta_title.get('content'):
+            return clean_text(meta_title['content'])
+
+        return None
+
+    def _extract_description(self, soup: BeautifulSoup) -> Optional[str]:
+        """Extract product description"""
+        selectors = [
+            '.product-description',
+            '.product-details',
+            '.description',
+            '[data-product-description]',
+            '.tab-content .description'
+        ]
+
+        for selector in selectors:
+            desc_elem = soup.select_one(selector)
+            if desc_elem:
+                return clean_text(desc_elem.get_text())
+
+        # Fallback: look for structured data
+        script = soup.find('script', {'type': 'application/ld+json'})
+        if script:
+            try:
+                import json
+                data = json.loads(script.string)
+                if isinstance(data, dict) and 'description' in data:
+                    return clean_text(data['description'])
+            except:
+                pass
+
+        return None
+
+    def _extract_price(self, soup: BeautifulSoup) -> Optional[float]:
+        """Extract product price"""
+        selectors = [
+            '.product-price',
+            '.price',
+            '.current-price',
+            '[data-price]'
+        ]
+
+        for selector in selectors:
+            price_elem = soup.select_one(selector)
+            if price_elem:
+                price_text = price_elem.get_text()
+                return extract_price(price_text)
+
+        # Look for price in scripts
+        script = soup.find('script', string=re.compile(r'price|Price'))
+        if script:
+            match = re.search(r'"price"\s*:\s*"([^"]*)"', script.string)
+            if match:
+                return extract_price(match.group(1))
+
+        return None
+
+    def _extract_collection(self, url: str) -> Optional[str]:
+        """Extract collection name from URL"""
+        match = re.search(r'/collections/([^/]+)', url)
+        if match:
+            collection = match.group(1).replace('-', ' ')
+            return collection
+        return None
+
+    def _extract_tags(self, collection: Optional[str], category: Optional[str]) -> List[str]:
+        """Extract tags for the product"""
+        tags = []
+        if collection:
+            tags.append(collection)
+        if category:
+            tags.append(category)
+        return tags
+
+    async def scrape_all_products(self, product_urls: List[str]) -> List[Dict[str, Any]]:
+        """Scrape all products concurrently"""
+        logger.info(f"Starting to scrape {len(product_urls)} products...")
+
+        async with setup_session() as session:
+            tasks = []
+            for url in product_urls:
+                tasks.append(self.scrape_product(session, url))
+                await asyncio.sleep(1 / REQUESTS_PER_SECOND)  # Rate limiting
+
+            # Use tqdm for progress tracking
+            products = []
+            with tqdm(total=len(tasks), desc="Scraping products") as pbar:
+                for coro in asyncio.as_completed(tasks):
+                    product = await coro
+                    if product:
+                        products.append(product)
+                    pbar.update(1)
+
+        logger.info(f"Successfully scraped {len(products)} products")
+        return products
+
+    def save_products_to_db(self, products: List[Dict[str, Any]]) -> int:
+        """Save products to database"""
+        logger.info(f"Saving {len(products)} products to database...")
+
+        success_count = self.db_manager.insert_products_batch(products)
+        logger.info(f"Saved {success_count}/{len(products)} products to database")
+
+        return success_count

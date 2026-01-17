@@ -1,0 +1,13 @@
+asyncio
+aiohttp
+beautifulsoup4
+requests
+supabase
+transformers
+torch
+Pillow
+numpy
+python-dotenv
+tqdm
+lxml
+fake-useragent
