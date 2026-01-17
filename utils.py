@@ -167,7 +167,9 @@ def is_in_stock(soup):
         'sold out',
         'out of stock',
         'unavailable',
-        'notify when available'
+        'notify when available',
+        'coming soon',
+        'pre-order'
     ]
 
     text_content = soup.get_text().lower()
@@ -175,15 +177,38 @@ def is_in_stock(soup):
         if indicator in text_content:
             return False
 
-    # Check for add to cart button
-    add_to_cart = soup.find('button', string=re.compile('add to cart|add to bag', re.I))
-    if add_to_cart and add_to_cart.get('disabled') is None:
+    # Check for add to cart button (most reliable indicator)
+    add_to_cart_buttons = soup.find_all('button', string=re.compile('add to cart|add to bag|buy now', re.I))
+    for button in add_to_cart_buttons:
+        if button.get('disabled') is None:
+            return True
+
+    # Check for variant availability in scripts
+    variant_scripts = soup.find_all('script', string=re.compile('available'))
+    for script in variant_scripts:
+        if '"available":true' in script.string:
+            return True
+
+    # Check for add to cart form (Shopify pattern)
+    cart_form = soup.find('form', {'action': re.compile('/cart/add')})
+    if cart_form:
         return True
 
-    # Check for variant availability
-    variant_script = soup.find('script', string=re.compile('available'))
-    if variant_script:
-        if '"available":true' in variant_script.string:
-            return True
+    # Check for quantity selector
+    quantity_input = soup.find('input', {'name': 'quantity', 'type': 'number'})
+    if quantity_input:
+        return True
+
+    # Check for size/variant selectors (if they exist, product is likely available)
+    size_select = soup.find('select', {'name': 'Size'})
+    variant_select = soup.find('select', {'name': 'variant'})
+    if size_select or variant_select:
+        # If there are size options and no "out of stock" text, assume available
+        return True
+
+    # More lenient: if we find any product-related form or button, assume in stock
+    product_forms = soup.find_all('form', class_=re.compile('product|add-to-cart'))
+    if product_forms:
+        return True
 
     return False  # Default to out of stock if unclear

@@ -99,7 +99,28 @@ class AboutBlankScraper:
 
                 # Check if in stock
                 if not is_in_stock(soup):
-                    logger.info(f"Skipping out of stock product: {url}")
+                    # Add debug info for stock detection
+                    add_to_cart = soup.find('button', string=re.compile('add to cart|add to bag', re.I))
+                    variant_script = soup.find('script', string=re.compile('available'))
+                    cart_form = soup.find('form', {'action': re.compile('/cart/add')})
+
+                    debug_info = []
+                    if add_to_cart:
+                        debug_info.append(f"add_to_cart_button: {bool(add_to_cart and add_to_cart.get('disabled') is None)}")
+                    else:
+                        debug_info.append("no_add_to_cart_button")
+
+                    if variant_script:
+                        debug_info.append(f"variant_script_has_available: {'\"available\":true' in variant_script.string}")
+                    else:
+                        debug_info.append("no_variant_script")
+
+                    if cart_form:
+                        debug_info.append("has_cart_form")
+                    else:
+                        debug_info.append("no_cart_form")
+
+                    logger.info(f"Skipping out of stock product: {url} | Debug: {' | '.join(debug_info)}")
                     return None
 
                 # Extract basic product info

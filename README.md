@@ -172,6 +172,57 @@ main.py
 - Respects robots.txt (implied)
 - No aggressive scraping patterns
 
+## GitHub Actions Setup
+
+The scraper includes GitHub Actions workflows for automated execution. To set them up:
+
+### 1. Configure Repository Secrets
+
+Go to your repository Settings → Secrets and variables → Actions, then add:
+
+- `SUPABASE_URL`: Your Supabase project URL
+- `SUPABASE_ANON_KEY`: Your Supabase anon/service key
+
+### 2. Available Workflows
+
+**Daily Scraper** (`scraper.yml`):
+- Runs automatically every day at midnight UTC
+- Can be triggered manually from the Actions tab
+- Choose between "full" (all products) or "test" (5 products) mode
+
+**Test Workflow** (`test.yml`):
+- Runs on every push and pull request
+- Tests that all components work correctly
+- Runs the test scraper with 5 products
+
+### 3. Manual Execution
+
+1. Go to the **Actions** tab in your repository
+2. Click on **"About Blank Scraper"** workflow
+3. Click **"Run workflow"**
+4. Choose mode: "full" or "test"
+5. Click **"Run workflow"**
+
+### 4. Monitoring
+
+- View workflow runs in the Actions tab
+- Download logs from the workflow artifacts
+- Check Supabase dashboard for new products
+
+### 5. Schedule Customization
+
+To change the schedule, edit `.github/workflows/scraper.yml`:
+
+```yaml
+schedule:
+  - cron: '0 0 * * *'  # Daily at midnight UTC
+```
+
+Common cron expressions:
+- `'0 0 * * *'` - Daily at midnight UTC
+- `'0 */6 * * *'` - Every 6 hours
+- `'0 0 * * 1'` - Weekly on Mondays
+
 ## License
 
 This scraper is for educational/research purposes. Respect the website's terms of service and implement appropriate delays between requests.
