@@ -12,3 +12,4 @@ tqdm
 lxml
 fake-useragent
 sentencepiece
+protobuf
