@@ -161,7 +161,7 @@ def get_image_url(soup, base_url=BASE_URL):
     return None
 
 def is_in_stock(soup):
-    """Check if product is in stock"""
+    """Check if product is in stock - prioritize UI elements over script data"""
     # Check for out of stock indicators
     out_of_stock_indicators = [
         'sold out',
@@ -169,7 +169,8 @@ def is_in_stock(soup):
         'unavailable',
         'notify when available',
         'coming soon',
-        'pre-order'
+        'pre-order',
+        'temporarily unavailable'
     ]
 
     text_content = soup.get_text().lower()
@@ -177,38 +178,55 @@ def is_in_stock(soup):
         if indicator in text_content:
             return False
 
-    # Check for add to cart button (most reliable indicator)
-    add_to_cart_buttons = soup.find_all('button', string=re.compile('add to cart|add to bag|buy now', re.I))
+    # PRIORITY 1: Check for functional add to cart button (most user-facing indicator)
+    add_to_cart_buttons = soup.find_all('button', string=re.compile('add to cart|add to bag|buy now|shop now', re.I))
     for button in add_to_cart_buttons:
         if button.get('disabled') is None:
+            # Check if button has proper styling/classes that indicate it's active
+            button_classes = button.get('class', [])
+            if not any(cls for cls in button_classes if 'disabled' in cls.lower() or 'unavailable' in cls.lower()):
+                return True
+
+    # PRIORITY 2: Check for add to cart form (Shopify pattern)
+    cart_form = soup.find('form', {'action': re.compile('/cart/add')})
+    if cart_form:
+        # Make sure form isn't hidden or disabled
+        if cart_form.get('style') != 'display: none' and not cart_form.get('disabled'):
             return True
 
-    # Check for variant availability in scripts
+    # PRIORITY 3: Check for quantity selector
+    quantity_input = soup.find('input', {'type': 'number', 'name': 'quantity'})
+    if quantity_input and not quantity_input.get('disabled'):
+        return True
+
+    # PRIORITY 4: Check for size/variant selectors (if they exist without "out of stock" text)
+    size_select = soup.find('select', {'name': 'Size'})
+    variant_select = soup.find('select', {'name': 'variant'})
+    if (size_select or variant_select):
+        # Only consider available if we don't see out of stock indicators
+        select_element = size_select or variant_select
+        if not select_element.get('disabled'):
+            return True
+
+    # PRIORITY 5: Check variant availability in scripts (less reliable, often wrong)
     variant_scripts = soup.find_all('script', string=re.compile('available'))
     for script in variant_scripts:
         if '"available":true' in script.string:
             return True
+        # If we find explicit "available":false, it might override UI elements
+        elif '"available":false' in script.string:
+            # But only if ALL variants are unavailable
+            continue
 
-    # Check for add to cart form (Shopify pattern)
-    cart_form = soup.find('form', {'action': re.compile('/cart/add')})
-    if cart_form:
-        return True
-
-    # Check for quantity selector
-    quantity_input = soup.find('input', {'name': 'quantity', 'type': 'number'})
-    if quantity_input:
-        return True
-
-    # Check for size/variant selectors (if they exist, product is likely available)
-    size_select = soup.find('select', {'name': 'Size'})
-    variant_select = soup.find('select', {'name': 'variant'})
-    if size_select or variant_select:
-        # If there are size options and no "out of stock" text, assume available
-        return True
-
-    # More lenient: if we find any product-related form or button, assume in stock
+    # PRIORITY 6: Look for any product-related interactive elements
     product_forms = soup.find_all('form', class_=re.compile('product|add-to-cart'))
-    if product_forms:
+    for form in product_forms:
+        if not form.get('disabled') and form.get('style') != 'display: none':
+            return True
+
+    # If we have add-to-cart buttons but variant scripts say false, be more lenient
+    # This handles cases where the site has UI elements but script data is wrong
+    if add_to_cart_buttons:
         return True
 
     return False  # Default to out of stock if unclear
