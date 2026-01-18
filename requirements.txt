@@ -11,3 +11,4 @@ python-dotenv
 tqdm
 lxml
 fake-useragent
+sentencepiece
