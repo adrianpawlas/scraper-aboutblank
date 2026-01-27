@@ -1,5 +1,7 @@
 import asyncio
 import aiohttp
+import json
+import requests
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin
@@ -18,6 +20,44 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+def _discover_via_shopify_json(base_url: str, collection_handle: str, existing_urls: set) -> List[str]:
+    """Fallback: discover product URLs via Shopify's collection products.json API."""
+    product_urls = []
+    page = 1
+    base_json_url = f"{base_url}/collections/{collection_handle}/products.json"
+
+    while True:
+        url = f"{base_json_url}?page={page}"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.warning(f"Shopify JSON fallback failed for {url}: {e}")
+            break
+
+        products = data.get("products") if isinstance(data, dict) else []
+        if not products:
+            break
+
+        for p in products:
+            handle = p.get("handle")
+            if not handle:
+                continue
+            full_url = f"{base_url}/products/{handle}"
+            if full_url not in existing_urls:
+                product_urls.append(full_url)
+
+        # Shopify usually returns 50–250 per page; if less, we're done
+        if len(products) < 50:
+            break
+        page += 1
+        time.sleep(0.5)
+
+    return product_urls
+
+
 class AboutBlankScraper:
     def __init__(self):
         self.db_manager = get_db_manager()
@@ -25,7 +65,7 @@ class AboutBlankScraper:
         self.existing_urls = self.db_manager.get_existing_product_urls("scraper")
 
     async def discover_product_urls(self) -> List[str]:
-        """Discover all product URLs from the shop-all collection"""
+        """Discover all product URLs from the shop-all collection."""
         logger.info("Starting product URL discovery...")
 
         product_urls = set()
@@ -49,26 +89,17 @@ class AboutBlankScraper:
             for link in product_links:
                 href = link.get('href')
                 if href and '/products/' in href:
-                    # Clean up the URL
                     if href.startswith('/'):
                         full_url = urljoin(BASE_URL, href)
                     else:
                         full_url = href
-
-                    # Remove any query parameters or fragments
                     full_url = full_url.split('?')[0].split('#')[0]
-
-                    # Only add if not already in database
                     if full_url not in self.existing_urls:
                         product_urls.add(full_url)
                         products_found_on_page += 1
-                        logger.debug(f"Added new URL: {full_url}")
-                    else:
-                        logger.debug(f"URL already exists: {full_url}")
 
             logger.info(f"Found {products_found_on_page} new products on page {page}")
 
-            # Check if there's a next page
             next_page = soup.find('a', string=re.compile(r'next|Next|NEXT', re.I))
             if not next_page or products_found_on_page == 0:
                 if page > 1 and products_found_on_page == 0:
@@ -76,14 +107,22 @@ class AboutBlankScraper:
                 break
 
             page += 1
-
-            # Rate limiting
             await asyncio.sleep(1 / REQUESTS_PER_SECOND)
-
-            # Safety break after 50 pages
             if page > 50:
                 logger.warning("Reached page limit (50), stopping discovery")
                 break
+
+        # If HTML returned no links (e.g. JS-only, bot block, or changed structure), use Shopify JSON API
+        if not product_urls:
+            logger.info("No product links in HTML; trying Shopify collection products.json...")
+            try:
+                match = re.search(r'/collections/([^/?#]+)', SHOP_ALL_URL)
+                handle = match.group(1) if match else "shop-all"
+                discovered = _discover_via_shopify_json(BASE_URL, handle, self.existing_urls)
+                product_urls = set(discovered)
+                logger.info(f"Shopify JSON fallback found {len(product_urls)} product URLs")
+            except Exception as e:
+                logger.warning(f"Shopify JSON fallback error: {e}")
 
         logger.info(f"Discovered {len(product_urls)} new product URLs")
         return list(product_urls)
