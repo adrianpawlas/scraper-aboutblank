@@ -88,6 +88,49 @@ class SigLIPEmbedder:
             logger.error(f"Error generating embedding for {image_url}: {e}")
             return None
 
+    def generate_text_embedding(self, text: str):
+        """Generate 768-dimensional text embedding using SigLIP text encoder (same space as image embeddings)."""
+        if not text or not text.strip():
+            return None
+        try:
+            # Text only: use processor's tokenizer; padding="max_length" as in SigLIP docs
+            inputs = self.processor(
+                text=[text.strip()],
+                padding="max_length",
+                return_tensors="pt",
+                truncation=True,
+            )
+            # get_text_features expects only input_ids and attention_mask (no pixel_values)
+            text_inputs = {k: v.to(self.device) for k, v in inputs.items() if k in ("input_ids", "attention_mask")}
+            if not text_inputs:
+                text_inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                # get_text_features returns pooler_output (projected text embedding, same dim as image_embeds)
+                text_output = self.model.get_text_features(**text_inputs)
+                embedding = text_output.pooler_output.cpu().numpy().flatten()
+
+            if len(embedding) != EMBEDDING_DIM:
+                if len(embedding) < EMBEDDING_DIM:
+                    embedding = np.pad(embedding, (0, EMBEDDING_DIM - len(embedding)))
+                else:
+                    embedding = embedding[:EMBEDDING_DIM]
+
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+
+            return embedding.tolist()
+        except Exception as e:
+            logger.error(f"Error generating text embedding: {e}")
+            return None
+
+    async def generate_text_embedding_async(self, text: str):
+        """Generate text embedding asynchronously."""
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            return await loop.run_in_executor(executor, self.generate_text_embedding, text)
+
     def __del__(self):
         """Cleanup GPU memory"""
         if hasattr(self, 'model'):
@@ -106,6 +149,14 @@ def get_embedder():
     return _embedder
 
 async def generate_image_embedding(image_url):
-    """Convenience function to generate embedding"""
+    """Convenience function to generate image embedding."""
     embedder = get_embedder()
     return await embedder.generate_embedding_async(image_url)
+
+
+async def generate_text_embedding(text: str):
+    """Convenience function to generate text embedding (same model as image, for info_embedding)."""
+    if not text or not text.strip():
+        return None
+    embedder = get_embedder()
+    return await embedder.generate_text_embedding_async(text)

@@ -61,7 +61,8 @@ async def main():
             logger.info(f"  Title: {sample.get('title')}")
             logger.info(f"  Price: {sample.get('price')}")
             logger.info(f"  Category: {sample.get('category')}")
-            logger.info(f"  Has embedding: {sample.get('embedding') is not None}")
+            logger.info(f"  Has image_embedding: {sample.get('image_embedding') is not None}")
+            logger.info(f"  Has info_embedding: {sample.get('info_embedding') is not None}")
 
     except Exception as e:
         logger.error(f"Fatal error during scraping: {e}")

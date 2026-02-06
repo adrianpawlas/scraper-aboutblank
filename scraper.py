@@ -9,10 +9,10 @@ from typing import List, Dict, Any, Optional
 from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS
 from utils import (
     generate_uuid, clean_text, extract_price, extract_sizes,
-    determine_category, determine_gender, is_in_stock, get_image_url,
+    determine_category, determine_gender, is_in_stock, get_all_product_image_urls,
     setup_session, sync_fetch_url
 )
-from embedding import generate_image_embedding
+from embedding import generate_image_embedding, generate_text_embedding
 from database import get_db_manager
 import logging
 from tqdm import tqdm
@@ -147,7 +147,11 @@ class AboutBlankScraper:
 
                 description = self._extract_description(soup)
                 price = self._extract_price(soup)
-                image_url = get_image_url(soup)
+                all_image_urls = get_all_product_image_urls(soup)
+                image_url = all_image_urls[0] if all_image_urls else None
+                additional_images = None
+                if len(all_image_urls) > 1:
+                    additional_images = " , ".join(all_image_urls[1:])
                 sizes = extract_sizes(soup)
                 collection = self._extract_collection(url)
 
@@ -159,11 +163,30 @@ class AboutBlankScraper:
                 from utils import is_in_stock
                 in_stock = is_in_stock(soup)
 
-                # Generate embedding if image exists
-                embedding = None
+                # Generate image embedding if main image exists
+                image_embedding = None
                 if image_url:
                     logger.info(f"Generating embedding for {title}")
-                    embedding = await generate_image_embedding(image_url)
+                    image_embedding = await generate_image_embedding(image_url)
+
+                # Build product info text for text embedding (name, category, size(s), description, etc.)
+                info_parts = [title]
+                if category:
+                    info_parts.append(category)
+                if gender:
+                    info_parts.append(gender)
+                if sizes:
+                    info_parts.append(" ".join(sizes))
+                if description:
+                    info_parts.append(description)
+                if collection:
+                    info_parts.append(collection)
+                if price is not None:
+                    info_parts.append(str(price))
+                info_text = " ".join(p for p in info_parts if p)
+                info_embedding = None
+                if info_text:
+                    info_embedding = await generate_text_embedding(info_text)
 
                 # Create product data
                 import json
@@ -178,16 +201,17 @@ class AboutBlankScraper:
                     'source': 'scraper',
                     'product_url': url,
                     'image_url': image_url,
+                    'additional_images': additional_images,
                     'brand': 'About Blank',
                     'title': title,
                     'description': description,
                     'category': category,
                     'gender': gender,
-                    'price': price,
-                    'currency': 'USD',
+                    'price': str(price) if price is not None else None,
                     'size': ','.join(sizes) if sizes else None,
                     'second_hand': False,
-                    'embedding': embedding,
+                    'image_embedding': image_embedding,
+                    'info_embedding': info_embedding,
                     'country': 'US',
                     'metadata': json.dumps(metadata),
                     'tags': self._extract_tags(collection, category)

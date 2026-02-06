@@ -100,7 +100,8 @@ async def test_single_product_scrape():
                 logger.info("Single product scrape successful!")
                 logger.info(f"Product title: {product.get('title')}")
                 logger.info(f"Product price: {product.get('price')}")
-                logger.info(f"Has embedding: {product.get('embedding') is not None}")
+                logger.info(f"Has image_embedding: {product.get('image_embedding') is not None}")
+                logger.info(f"Has info_embedding: {product.get('info_embedding') is not None}")
                 return True
             else:
                 logger.warning("Single product scrape returned None")

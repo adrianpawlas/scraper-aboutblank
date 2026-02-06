@@ -115,50 +115,73 @@ def setup_session():
     headers['User-Agent'] = ua.random
     return aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS))
 
-def get_image_url(soup, base_url=BASE_URL):
-    """Extract main product image URL"""
-    all_imgs = soup.find_all('img')
+def _normalize_image_src(src, base_url=BASE_URL):
+    """Normalize image src to full URL."""
+    if not src:
+        return None
+    if src.startswith('//'):
+        return 'https:' + src
+    if src.startswith('/'):
+        return urljoin(base_url, src)
+    if not src.startswith('http'):
+        return urljoin(base_url, src)
+    return src
 
-    # First priority: images with product name in alt text
+
+def get_all_product_image_urls(soup, base_url=BASE_URL):
+    """
+    Extract all product image URLs. First item is the main image, rest are additional.
+    Returns list of full URLs, deduplicated, main first.
+    """
+    all_imgs = soup.find_all('img')
+    seen = set()
+    ordered_urls = []  # (order_index, url) for stable ordering
+    product_cdn_urls = []  # cdn/shop/files URLs in order
+
+    for idx, img in enumerate(all_imgs):
+        src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+        if not src or any(word in src.lower() for word in ['icon', 'logo', 'social', 'favicon', 'menu']):
+            continue
+        url = _normalize_image_src(src, base_url)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if 'cdn/shop/files' in src:
+            product_cdn_urls.append((idx, url))
+        ordered_urls.append((idx, url))
+
+    # Prefer product CDN images as product gallery
+    candidate_list = product_cdn_urls if product_cdn_urls else ordered_urls
+    if not candidate_list:
+        return []
+
+    # Main image: first one with good alt, or first CDN, or first any
+    main_url = None
     for img in all_imgs:
         src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
         alt = img.get('alt', '').lower()
-        if src and alt and len(alt) > 3:  # Avoid empty or very short alt text
-            # Check if alt text contains product-related words or is not generic
-            if not any(generic in alt for generic in ['logo', 'icon', 'social', 'menu', 'search']):
-                if src.startswith('//'):
-                    src = 'https:' + src
-                elif src.startswith('/'):
-                    src = urljoin(base_url, src)
-                elif not src.startswith('http'):
-                    src = urljoin(base_url, src)
-                return src
+        if src and alt and len(alt) > 3 and not any(g in alt for g in ['logo', 'icon', 'social', 'menu', 'search']):
+            url = _normalize_image_src(src, base_url)
+            if url and url in seen:
+                main_url = url
+                break
+    if not main_url and product_cdn_urls:
+        main_url = product_cdn_urls[0][1]
+    if not main_url and ordered_urls:
+        main_url = ordered_urls[0][1]
 
-    # Second priority: any image from the product CDN
-    for img in all_imgs:
-        src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-        if src and 'cdn/shop/files' in src:
-            if src.startswith('//'):
-                src = 'https:' + src
-            elif src.startswith('/'):
-                src = urljoin(base_url, src)
-            elif not src.startswith('http'):
-                src = urljoin(base_url, src)
-            return src
+    # Build result: main first, then rest in order of appearance
+    result = [main_url] if main_url else []
+    for _, url in sorted(candidate_list, key=lambda x: x[0]):
+        if url != main_url:
+            result.append(url)
+    return result
 
-    # Last resort: any image that's not clearly an icon/logo
-    for img in all_imgs:
-        src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-        if src and not any(word in src.lower() for word in ['icon', 'logo', 'social', 'favicon', 'menu']):
-            if src.startswith('//'):
-                src = 'https:' + src
-            elif src.startswith('/'):
-                src = urljoin(base_url, src)
-            elif not src.startswith('http'):
-                src = urljoin(base_url, src)
-            return src
 
-    return None
+def get_image_url(soup, base_url=BASE_URL):
+    """Extract main product image URL (first from get_all_product_image_urls)."""
+    urls = get_all_product_image_urls(soup, base_url)
+    return urls[0] if urls else None
 
 def is_in_stock(soup):
     """Check if product is in stock - prioritize UI elements over script data"""

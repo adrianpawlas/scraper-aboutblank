@@ -3,6 +3,7 @@ aiohttp
 beautifulsoup4
 requests
 supabase
+websockets>=14
 transformers
 torch
 Pillow

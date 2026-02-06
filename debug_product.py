@@ -50,8 +50,9 @@ async def debug_product():
             print(f"Price: {price}")
 
             # Extract image
-            from utils import get_image_url
-            image_url = get_image_url(soup)
+            from utils import get_all_product_image_urls
+            urls = get_all_product_image_urls(soup)
+            image_url = urls[0] if urls else None
             print(f"Image URL: {image_url}")
 
         else:
@@ -65,7 +66,7 @@ async def debug_product():
         if product:
             print("Product data:")
             for key, value in product.items():
-                if key == 'embedding' and value is not None:
+                if key in ('image_embedding', 'info_embedding') and value is not None:
                     print(f"  {key}: [list of {len(value)} floats]")
                 else:
                     print(f"  {key}: {value} (type: {type(value)})")

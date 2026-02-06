@@ -25,9 +25,10 @@ class SupabaseManager:
             # Remove None values and convert to proper format
             clean_data = {k: v for k, v in product_data.items() if v is not None}
 
-            # Convert embedding list to proper format if needed
-            if 'embedding' in clean_data and isinstance(clean_data['embedding'], list):
-                clean_data['embedding'] = clean_data['embedding']
+            # Embeddings are stored as lists; DB expects vector type (Supabase/PostgREST accept list)
+            for key in ('image_embedding', 'info_embedding'):
+                if key in clean_data and isinstance(clean_data[key], list):
+                    clean_data[key] = clean_data[key]
 
             logger.info(f"Attempting to insert product: {clean_data.get('title', 'Unknown')}")
             logger.debug(f"Product data keys: {list(clean_data.keys())}")
@@ -77,9 +78,9 @@ class SupabaseManager:
             return set()
 
     def update_product_embedding(self, product_id: str, embedding: List[float]) -> bool:
-        """Update product embedding"""
+        """Update product image_embedding"""
         try:
-            result = self.client.table('products').update({'embedding': embedding}).eq('id', product_id).execute()
+            result = self.client.table('products').update({'image_embedding': embedding}).eq('id', product_id).execute()
             return len(result.data) > 0
         except Exception as e:
             logger.error(f"Error updating embedding for product {product_id}: {e}")
