@@ -28,11 +28,11 @@ SOURCE = "scraper"
 COUNTRY = "US"
 CURRENCY = "USD"
 
-# Category mapping (from collection names to our categories)
+# Canonical categories: clothes, footwear, accessories. Keywords (from collection/section names) map to each.
 CATEGORY_MAPPING = {
-    'clothes': ['t-shirts', 'hoodies & sweats', 'knitwear', 'outerwear', 'shirts', 'vests'],
-    'accessories': ['accessories', 'headwear'],
-    'footwear': []  # No footwear category visible
+    'clothes': ['t-shirts', 'hoodies & sweats', 'hoodies', 'sweats', 'knitwear', 'outerwear', 'shirts', 'vests', 'sweaters', 'raglan', 'tops', 'bottoms', 'pants', 'denim', 'jackets', 'sweatshirts', 'long sleeve', 'short sleeve', 'crew', 'waffle', 'box', 'garcon', 'monogram', 'emblem', 'blazon', 'insignia', 'dual logo', 'pleated', 'relaxed', 'wide leg', 'tailored', 'fitted', 'washed', 'rib mock', 'alpaca', 'oxford', 'liner quilted', 'dominoes', 'playing cards', '2 pack', 'tote bag', 'lighter case', 'herb grinder', 'digital gift cards'],
+    'accessories': ['accessories', 'headwear', 'cap', 'caps', 'hat', 'bag', 'bags', 'wallet', 'belt', 'scarf', 'beanie', 'flap cap', 'box cap', 'nylon cap', 'monogram cap', 'monogram wool', 'monogram pinstripe', 'monogram leatherette', 'everyday tote'],
+    'footwear': ['footwear', 'shoes', 'sneakers', 'boots', 'sandals']
 }
 
 # Rate limiting

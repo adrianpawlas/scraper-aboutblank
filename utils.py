@@ -40,16 +40,33 @@ CURRENCY_SYMBOLS = {'$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', 'Kč': '
 CURRENCY_CODES = {'USD', 'EUR', 'GBP', 'JPY', 'CZK', 'PLN', 'SEK', 'NOK', 'DKK', 'CHF', 'HUF', 'RON', 'BGN'}
 
 
+def _normalize_price_value(val: float, currency: str) -> float:
+    """Convert cents to units for USD/EUR/GBP when value looks like cents (e.g. 2000 -> 20)."""
+    if currency in ('USD', 'EUR', 'GBP') and val >= 100 and val == int(val):
+        # Likely stored in cents
+        return round(val / 100.0, 2)
+    return val
+
+
 def extract_prices_with_currencies(soup):
     """
-    Extract all prices with currency from product page. Returns a string like "20USD, 5EUR, 1CZK"
-    or None. Ensures at least USD or EUR when any price is found.
+    Extract one price per currency from product page. Returns "20USD, 5EUR" or None.
+    Normalizes cents to dollars for USD/EUR/GBP. Ensures at least USD or EUR.
     """
     import json
-    seen = set()  # (value, currency) to dedupe
-    results = []
+    # Priority order: JSON-LD (display) first, then visible, then script. One value per currency.
+    by_currency = {}
 
-    # 1) JSON-LD product schema: offers.price, offers.priceCurrency
+    def add(val, c):
+        c = (c or 'USD').upper()[:3]
+        val = _normalize_price_value(val, c)
+        if c not in by_currency:
+            by_currency[c] = val
+        # Prefer value that looks like display (not huge); keep first from higher-priority source
+        elif val < 10000 and by_currency[c] > 10000:
+            by_currency[c] = val
+
+    # 1) JSON-LD (most reliable display price)
     for script in soup.find_all('script', type='application/ld+json'):
         try:
             data = json.loads(script.string or '{}')
@@ -60,52 +77,52 @@ def extract_prices_with_currencies(soup):
                 for o in (offers or []):
                     if not isinstance(o, dict):
                         continue
-                    p = o.get('price')
-                    c = (o.get('priceCurrency') or 'USD').upper()[:3]
-                    if p is not None and c:
+                    p, c = o.get('price'), (o.get('priceCurrency') or 'USD').upper()[:3]
+                    if p is not None:
                         try:
-                            val = float(p) if not isinstance(p, (int, float)) else float(p)
-                            if (val, c) not in seen:
-                                seen.add((val, c))
-                                results.append((val, c))
+                            add(float(p), c)
                         except (TypeError, ValueError):
                             pass
-            # Array of graphs
             if isinstance(data, list):
                 for g in data:
                     if isinstance(g, dict) and g.get('@type') == 'Product':
-                        offers = g.get('offers')
-                        if isinstance(offers, dict):
-                            offers = [offers]
-                        for o in (offers or []):
+                        for o in (g.get('offers') or []) if isinstance(g.get('offers'), list) else ([g.get('offers')] if isinstance(g.get('offers'), dict) else []):
                             if not isinstance(o, dict):
                                 continue
-                            p = o.get('price')
-                            c = (o.get('priceCurrency') or 'USD').upper()[:3]
-                            if p is not None and c:
+                            p, c = o.get('price'), (o.get('priceCurrency') or 'USD').upper()[:3]
+                            if p is not None:
                                 try:
-                                    val = float(p)
-                                    if (val, c) not in seen:
-                                        seen.add((val, c))
-                                        results.append((val, c))
+                                    add(float(p), c)
                                 except (TypeError, ValueError):
                                     pass
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # 2) Scripts: Shopify variants "price":"12000" (cents) and money_format / shop currency
+    # 2) Visible price elements (display prices)
+    for elem in soup.select('.price, .product-price, [data-price], .current-price, .money'):
+        text = (elem.get_text() or '').strip()
+        if not text or len(text) > 50:
+            continue
+        for m in re.finditer(r'(\d+(?:[.,]\d{1,2})?)\s*([A-Z]{3})?', text):
+            try:
+                val = float(m.group(1).replace(',', '.'))
+            except ValueError:
+                continue
+            c = (m.group(2) or '').upper() or None
+            if not c:
+                c = 'USD' if '$' in text else 'EUR' if '€' in text else 'GBP' if '£' in text else 'USD'
+            if c:
+                add(val, c)
+            break  # one price per element
+
+    # 3) Scripts: Shopify variant price (often in cents) - only fill if we don't have that currency yet
     for script in soup.find_all('script', string=re.compile(r'price|variant|money_format')):
         s = script.string or ''
-        # "price":12000 or "price":"120.00"
         for m in re.finditer(r'"price"\s*:\s*["\']?(\d+(?:\.\d*)?)', s):
             try:
                 raw = float(m.group(1))
-                # If number is very large, likely cents
-                if raw > 10000 and raw == int(raw):
-                    raw = raw / 100.0
                 c = 'USD'
-                # Try to find currency in same script
-                if 'EUR' in s or '€' in s or 'euro' in s.lower():
+                if 'EUR' in s or '€' in s:
                     c = 'EUR'
                 elif 'GBP' in s or '£' in s:
                     c = 'GBP'
@@ -113,52 +130,19 @@ def extract_prices_with_currencies(soup):
                     c = 'CZK'
                 elif 'PLN' in s or 'zł' in s:
                     c = 'PLN'
-                if (raw, c) not in seen:
-                    seen.add((raw, c))
-                    results.append((raw, c))
+                if c not in by_currency:
+                    add(raw, c)
             except (ValueError, IndexError):
                 pass
+        break  # one script pass
 
-    # 3) Visible price elements with currency symbol/code
-    for elem in soup.select('.price, .product-price, [data-price], .current-price, .money'):
-        text = (elem.get_text() or '').strip()
-        if not text or len(text) > 50:
-            continue
-        # Pattern: number + optional currency (e.g. "120.00 USD", "120 USD", "€ 120", "$120")
-        for m in re.finditer(r'(\d+(?:[.,]\d{1,2})?)\s*([A-Z]{3})?', text):
-            val_str = m.group(1).replace(',', '.')
-            try:
-                val = float(val_str)
-            except ValueError:
-                continue
-            c = (m.group(2) or '').upper() or None
-            if not c:
-                if '$' in text:
-                    c = 'USD'
-                elif '€' in text:
-                    c = 'EUR'
-                elif '£' in text:
-                    c = 'GBP'
-                elif 'Kč' in text or 'CZK' in text:
-                    c = 'CZK'
-                elif 'zł' in text or 'PLN' in text:
-                    c = 'PLN'
-                else:
-                    c = 'USD'
-            if c and (val, c) not in seen:
-                seen.add((val, c))
-                results.append((val, c))
-
-    if not results:
+    if not by_currency:
         return None
-    # Require at least USD or EUR
-    has_usd_eur = any(c in ('USD', 'EUR') for _, c in results)
+    has_usd_eur = any(c in ('USD', 'EUR') for c in by_currency)
     if not has_usd_eur:
-        # Prefer adding USD from first price (as placeholder) or leave as-is per requirement
-        first_val = results[0][0]
-        results.insert(0, (first_val, 'USD'))
-    # Format: "20USD, 5EUR, 1CZK"
-    parts = [f"{int(v) if v == int(v) else v}{c}" for v, c in results]
+        first_val = next(iter(by_currency.values()))
+        by_currency['USD'] = _normalize_price_value(first_val, 'USD')
+    parts = [f"{int(v) if v == int(v) else v}{c}" for c, v in sorted(by_currency.items())]
     return ", ".join(parts)
 
 def extract_sizes(soup):
@@ -197,68 +181,76 @@ def normalize_category_display(name):
     """Turn 'Sweaters & Hoodies' into 'Sweaters, Hoodies' (comma-separated, no ' & ')."""
     if not name or not name.strip():
         return None
-    # Replace " & " with ", " and " and " with ", " for consistency
     s = name.strip().replace(" & ", ", ").replace(" and ", ", ")
-    # Collapse multiple commas/spaces
     s = re.sub(r',\s*,', ',', s).strip(' ,')
     return s if s else None
 
 
+def map_raw_categories_to_canonical(raw_names):
+    """
+    Map raw category/collection names to canonical: clothes, footwear, accessories.
+    Returns comma-separated string e.g. "clothes" or "clothes, accessories".
+    """
+    from config import CATEGORY_MAPPING
+    canonical = set()
+    for raw in raw_names:
+        if not raw or not raw.strip():
+            continue
+        lower = raw.lower().strip()
+        for canonical_name, keywords in CATEGORY_MAPPING.items():
+            if any(kw in lower for kw in keywords):
+                canonical.add(canonical_name)
+                break
+    if not canonical:
+        return None
+    return ", ".join(sorted(canonical))
+
+
 def extract_categories_from_page(soup, base_url):
     """
-    Extract category/categories from product page: breadcrumb, collection links, JSON-LD.
-    Returns a single string with categories comma-separated (e.g. "Sweaters, Hoodies").
+    Extract category from product page and map to canonical: clothes, footwear, accessories.
+    Returns comma-separated canonical string e.g. "clothes" or "clothes, accessories".
     """
     from urllib.parse import unquote
-    categories = []
+    import json
+    raw_names = []
     seen = set()
 
-    # 1) Links to /collections/xxx (breadcrumb or nav)
+    # 1) Links to /collections/xxx
     for a in soup.find_all('a', href=re.compile(r'/collections/[\w\-]+')):
         href = a.get('href') or ''
         m = re.search(r'/collections/([^/?#]+)', href)
         if m:
             raw = unquote(m.group(1)).replace('-', ' ').strip()
+            if raw and raw.lower() not in seen:
+                seen.add(raw.lower())
+                raw_names.append(raw)
             norm = normalize_category_display(raw)
-            if norm and norm.lower() not in seen:
-                seen.add(norm.lower())
-                # If normalized contains comma, split and add each part
+            if norm:
                 for part in [p.strip() for p in norm.split(',') if p.strip()]:
                     if part.lower() not in seen:
                         seen.add(part.lower())
-                        categories.append(part)
+                        raw_names.append(part)
 
-    # 2) JSON-LD breadcrumb or product category
+    # 2) JSON-LD breadcrumb / product category
     for script in soup.find_all('script', type='application/ld+json'):
         try:
-            import json
             data = json.loads(script.string or '{}')
             if isinstance(data, dict) and data.get('@type') == 'BreadcrumbList':
                 for item in data.get('itemListElement', []):
                     name = item.get('name') if isinstance(item, dict) else None
-                    if name and name.lower() not in seen:
-                        norm = normalize_category_display(name)
-                        if norm and norm.lower() not in seen:
-                            seen.add(norm.lower())
-                            for part in [p.strip() for p in norm.split(',') if p.strip()]:
-                                if part.lower() not in seen and part.lower() not in ('home', 'products', 'shop', 'all'):
-                                    seen.add(part.lower())
-                                    categories.append(part)
+                    if name and name.lower() not in seen and name.lower() not in ('home', 'products', 'shop', 'all'):
+                        seen.add(name.lower())
+                        raw_names.append(name)
             if isinstance(data, dict) and data.get('@type') == 'Product':
                 for cat in (data.get('category') or data.get('categories') or []):
                     if isinstance(cat, str) and cat.lower() not in seen:
-                        norm = normalize_category_display(cat)
-                        if norm:
-                            for part in [p.strip() for p in norm.split(',') if p.strip()]:
-                                if part.lower() not in seen:
-                                    seen.add(part.lower())
-                                    categories.append(part)
+                        seen.add(cat.lower())
+                        raw_names.append(cat)
         except (json.JSONDecodeError, TypeError):
             pass
 
-    if not categories:
-        return None
-    return ", ".join(categories)
+    return map_raw_categories_to_canonical(raw_names)
 
 
 def determine_category(collection_name, product_title):
