@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import aiohttp
 import requests
 from fake_useragent import UserAgent
@@ -8,8 +9,15 @@ import uuid
 from urllib.parse import urljoin
 from config import HEADERS, BASE_URL, MAX_CONCURRENT_REQUESTS
 
+
+def generate_product_id(source: str, product_url: str) -> str:
+    """Stable id for upsert: same product always gets the same row."""
+    id_string = f"{source}:{product_url}"
+    return hashlib.sha256(id_string.encode("utf-8")).hexdigest()
+
+
 def generate_uuid():
-    """Generate a unique UUID for product ID"""
+    """Generate a unique UUID for product ID (legacy). Prefer generate_product_id for products."""
     return str(uuid.uuid4())
 
 def clean_text(text):

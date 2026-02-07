@@ -1,14 +1,14 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 
-# Supabase Configuration
-SUPABASE_URL = "https://yqawmzggcgpeyaaynrjk.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlxYXdtemdnY2dwZXlhYXlucmprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTAxMDkyNiwiZXhwIjoyMDcwNTg2OTI2fQ.XtLpxausFriraFJeX27ZzsdQsFv3uQKXBBggoz6P4D4"
-
-# Set service role key for full access
-os.environ['SUPABASE_SERVICE_ROLE_KEY'] = SUPABASE_ANON_KEY
+# Supabase Configuration (PostgREST API)
+# Set SUPABASE_URL and SUPABASE_KEY in .env (or SUPABASE_ANON_KEY as fallback)
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+if not SUPABASE_URL or not SUPABASE_KEY:
+    pass  # Allow missing at import; database module will raise on first use
 
 # Scraper Configuration
 BASE_URL = "https://about---blank.com"

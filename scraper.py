@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 from typing import List, Dict, Any, Optional
 from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS
 from utils import (
-    generate_uuid, clean_text, extract_price, extract_sizes,
+    generate_product_id, clean_text, extract_price, extract_sizes,
     determine_category, determine_gender, is_in_stock, get_all_product_image_urls,
     setup_session, sync_fetch_url
 )
@@ -197,7 +197,7 @@ class AboutBlankScraper:
                 }
 
                 product_data = {
-                    'id': generate_uuid(),
+                    'id': generate_product_id('scraper', url),
                     'source': 'scraper',
                     'product_url': url,
                     'image_url': image_url,
