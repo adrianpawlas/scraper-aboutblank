@@ -27,15 +27,139 @@ def clean_text(text):
     return ' '.join(text.strip().split())
 
 def extract_price(text):
-    """Extract price from text, handling currency symbols"""
+    """Extract price from text, handling currency symbols (returns single float)."""
     if not text:
         return None
-
-    # Remove currency symbols and find numeric values
     cleaned = re.sub(r'[£$€¥₹₽₩₦₨₪₫₡₵₺₴₸₼₲₱₭₯₰₳₶₷₹₻₽₾₿]', '', text)
-    # Find price pattern (e.g., "120.00" or "120")
     match = re.search(r'(\d+(?:\.\d{2})?)', cleaned)
     return float(match.group(1)) if match else None
+
+
+# Currency symbols/codes we recognize for multi-currency price extraction
+CURRENCY_SYMBOLS = {'$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', 'Kč': 'CZK', 'kr': 'SEK', 'zł': 'PLN', 'Ft': 'HUF'}
+CURRENCY_CODES = {'USD', 'EUR', 'GBP', 'JPY', 'CZK', 'PLN', 'SEK', 'NOK', 'DKK', 'CHF', 'HUF', 'RON', 'BGN'}
+
+
+def extract_prices_with_currencies(soup):
+    """
+    Extract all prices with currency from product page. Returns a string like "20USD, 5EUR, 1CZK"
+    or None. Ensures at least USD or EUR when any price is found.
+    """
+    import json
+    seen = set()  # (value, currency) to dedupe
+    results = []
+
+    # 1) JSON-LD product schema: offers.price, offers.priceCurrency
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(script.string or '{}')
+            if isinstance(data, dict) and data.get('@type') == 'Product':
+                offers = data.get('offers')
+                if isinstance(offers, dict):
+                    offers = [offers]
+                for o in (offers or []):
+                    if not isinstance(o, dict):
+                        continue
+                    p = o.get('price')
+                    c = (o.get('priceCurrency') or 'USD').upper()[:3]
+                    if p is not None and c:
+                        try:
+                            val = float(p) if not isinstance(p, (int, float)) else float(p)
+                            if (val, c) not in seen:
+                                seen.add((val, c))
+                                results.append((val, c))
+                        except (TypeError, ValueError):
+                            pass
+            # Array of graphs
+            if isinstance(data, list):
+                for g in data:
+                    if isinstance(g, dict) and g.get('@type') == 'Product':
+                        offers = g.get('offers')
+                        if isinstance(offers, dict):
+                            offers = [offers]
+                        for o in (offers or []):
+                            if not isinstance(o, dict):
+                                continue
+                            p = o.get('price')
+                            c = (o.get('priceCurrency') or 'USD').upper()[:3]
+                            if p is not None and c:
+                                try:
+                                    val = float(p)
+                                    if (val, c) not in seen:
+                                        seen.add((val, c))
+                                        results.append((val, c))
+                                except (TypeError, ValueError):
+                                    pass
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 2) Scripts: Shopify variants "price":"12000" (cents) and money_format / shop currency
+    for script in soup.find_all('script', string=re.compile(r'price|variant|money_format')):
+        s = script.string or ''
+        # "price":12000 or "price":"120.00"
+        for m in re.finditer(r'"price"\s*:\s*["\']?(\d+(?:\.\d*)?)', s):
+            try:
+                raw = float(m.group(1))
+                # If number is very large, likely cents
+                if raw > 10000 and raw == int(raw):
+                    raw = raw / 100.0
+                c = 'USD'
+                # Try to find currency in same script
+                if 'EUR' in s or '€' in s or 'euro' in s.lower():
+                    c = 'EUR'
+                elif 'GBP' in s or '£' in s:
+                    c = 'GBP'
+                elif 'CZK' in s or 'Kč' in s:
+                    c = 'CZK'
+                elif 'PLN' in s or 'zł' in s:
+                    c = 'PLN'
+                if (raw, c) not in seen:
+                    seen.add((raw, c))
+                    results.append((raw, c))
+            except (ValueError, IndexError):
+                pass
+
+    # 3) Visible price elements with currency symbol/code
+    for elem in soup.select('.price, .product-price, [data-price], .current-price, .money'):
+        text = (elem.get_text() or '').strip()
+        if not text or len(text) > 50:
+            continue
+        # Pattern: number + optional currency (e.g. "120.00 USD", "120 USD", "€ 120", "$120")
+        for m in re.finditer(r'(\d+(?:[.,]\d{1,2})?)\s*([A-Z]{3})?', text):
+            val_str = m.group(1).replace(',', '.')
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            c = (m.group(2) or '').upper() or None
+            if not c:
+                if '$' in text:
+                    c = 'USD'
+                elif '€' in text:
+                    c = 'EUR'
+                elif '£' in text:
+                    c = 'GBP'
+                elif 'Kč' in text or 'CZK' in text:
+                    c = 'CZK'
+                elif 'zł' in text or 'PLN' in text:
+                    c = 'PLN'
+                else:
+                    c = 'USD'
+            if c and (val, c) not in seen:
+                seen.add((val, c))
+                results.append((val, c))
+
+    if not results:
+        return None
+    # Require at least USD or EUR
+    has_usd_eur = any(c in ('USD', 'EUR') for _, c in results)
+    if not has_usd_eur:
+        # Prefer adding USD from first price (as placeholder) or leave as-is per requirement
+        first_val = results[0][0]
+        results.insert(0, (first_val, 'USD'))
+    # Format: "20USD, 5EUR, 1CZK"
+    parts = [f"{int(v) if v == int(v) else v}{c}" for v, c in results]
+    return ", ".join(parts)
 
 def extract_sizes(soup):
     """Extract available sizes from product page"""
@@ -69,25 +193,86 @@ def extract_sizes(soup):
 
     return list(set(sizes))  # Remove duplicates
 
-def determine_category(collection_name, product_title):
-    """Determine category based on collection name and product title"""
-    from config import CATEGORY_MAPPING
+def normalize_category_display(name):
+    """Turn 'Sweaters & Hoodies' into 'Sweaters, Hoodies' (comma-separated, no ' & ')."""
+    if not name or not name.strip():
+        return None
+    # Replace " & " with ", " and " and " with ", " for consistency
+    s = name.strip().replace(" & ", ", ").replace(" and ", ", ")
+    # Collapse multiple commas/spaces
+    s = re.sub(r',\s*,', ',', s).strip(' ,')
+    return s if s else None
 
+
+def extract_categories_from_page(soup, base_url):
+    """
+    Extract category/categories from product page: breadcrumb, collection links, JSON-LD.
+    Returns a single string with categories comma-separated (e.g. "Sweaters, Hoodies").
+    """
+    from urllib.parse import unquote
+    categories = []
+    seen = set()
+
+    # 1) Links to /collections/xxx (breadcrumb or nav)
+    for a in soup.find_all('a', href=re.compile(r'/collections/[\w\-]+')):
+        href = a.get('href') or ''
+        m = re.search(r'/collections/([^/?#]+)', href)
+        if m:
+            raw = unquote(m.group(1)).replace('-', ' ').strip()
+            norm = normalize_category_display(raw)
+            if norm and norm.lower() not in seen:
+                seen.add(norm.lower())
+                # If normalized contains comma, split and add each part
+                for part in [p.strip() for p in norm.split(',') if p.strip()]:
+                    if part.lower() not in seen:
+                        seen.add(part.lower())
+                        categories.append(part)
+
+    # 2) JSON-LD breadcrumb or product category
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            import json
+            data = json.loads(script.string or '{}')
+            if isinstance(data, dict) and data.get('@type') == 'BreadcrumbList':
+                for item in data.get('itemListElement', []):
+                    name = item.get('name') if isinstance(item, dict) else None
+                    if name and name.lower() not in seen:
+                        norm = normalize_category_display(name)
+                        if norm and norm.lower() not in seen:
+                            seen.add(norm.lower())
+                            for part in [p.strip() for p in norm.split(',') if p.strip()]:
+                                if part.lower() not in seen and part.lower() not in ('home', 'products', 'shop', 'all'):
+                                    seen.add(part.lower())
+                                    categories.append(part)
+            if isinstance(data, dict) and data.get('@type') == 'Product':
+                for cat in (data.get('category') or data.get('categories') or []):
+                    if isinstance(cat, str) and cat.lower() not in seen:
+                        norm = normalize_category_display(cat)
+                        if norm:
+                            for part in [p.strip() for p in norm.split(',') if p.strip()]:
+                                if part.lower() not in seen:
+                                    seen.add(part.lower())
+                                    categories.append(part)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if not categories:
+        return None
+    return ", ".join(categories)
+
+
+def determine_category(collection_name, product_title):
+    """Fallback: determine category from collection/title when page extraction has nothing."""
+    from config import CATEGORY_MAPPING
     collection_lower = collection_name.lower() if collection_name else ""
     title_lower = product_title.lower() if product_title else ""
-
-    # Check collection mapping
     for category, keywords in CATEGORY_MAPPING.items():
         if any(keyword in collection_lower for keyword in keywords):
             return category
-
-    # Fallback to title-based detection
     if any(word in title_lower for word in ['hat', 'cap', 'beanie', 'scarf', 'belt', 'bag', 'wallet']):
         return 'accessories'
-
     if any(word in title_lower for word in ['t-shirt', 'hoodie', 'sweatshirt', 'jacket', 'coat', 'pants', 'jeans', 'shirt', 'vest', 'knitwear']):
         return 'clothes'
-
     return None
 
 def determine_gender(category):

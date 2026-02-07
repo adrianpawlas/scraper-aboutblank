@@ -8,7 +8,8 @@ from urllib.parse import urljoin
 from typing import List, Dict, Any, Optional
 from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS
 from utils import (
-    generate_product_id, clean_text, extract_price, extract_sizes,
+    generate_product_id, clean_text, extract_sizes,
+    extract_categories_from_page, extract_prices_with_currencies,
     determine_category, determine_gender, is_in_stock, get_all_product_image_urls,
     setup_session, sync_fetch_url
 )
@@ -146,7 +147,7 @@ class AboutBlankScraper:
                     return None
 
                 description = self._extract_description(soup)
-                price = self._extract_price(soup)
+                price = extract_prices_with_currencies(soup)  # "20USD, 5EUR" or None
                 all_image_urls = get_all_product_image_urls(soup)
                 image_url = all_image_urls[0] if all_image_urls else None
                 additional_images = None
@@ -155,8 +156,10 @@ class AboutBlankScraper:
                 sizes = extract_sizes(soup)
                 collection = self._extract_collection(url)
 
-                # Determine category and gender
-                category = determine_category(collection, title)
+                # Category from page (collection links, breadcrumb); fallback to determine_category
+                category = extract_categories_from_page(soup, url)
+                if not category:
+                    category = determine_category(collection, title)
                 gender = determine_gender(category)
 
                 # Check stock status (but don't skip - we want all products)
@@ -181,8 +184,8 @@ class AboutBlankScraper:
                     info_parts.append(description)
                 if collection:
                     info_parts.append(collection)
-                if price is not None:
-                    info_parts.append(str(price))
+                if price:
+                    info_parts.append(price)
                 info_text = " ".join(p for p in info_parts if p)
                 info_embedding = None
                 if info_text:
@@ -207,12 +210,12 @@ class AboutBlankScraper:
                     'description': description,
                     'category': category,
                     'gender': gender,
-                    'price': str(price) if price is not None else None,
+                    'price': price,  # "20USD, 5EUR" or None
                     'size': ','.join(sizes) if sizes else None,
                     'second_hand': False,
                     'image_embedding': image_embedding,
                     'info_embedding': info_embedding,
-                    'country': 'US',
+                    'country': None,
                     'metadata': json.dumps(metadata),
                     'tags': self._extract_tags(collection, category)
                 }
