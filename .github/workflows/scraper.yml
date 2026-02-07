@@ -58,10 +58,11 @@ jobs:
         import os
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=False)
 
-        SUPABASE_URL = "${{ secrets.SUPABASE_URL }}"
+        SUPABASE_URL = ("${{ secrets.SUPABASE_URL }}" or "").rstrip("/")
         SUPABASE_ANON_KEY = "${{ secrets.SUPABASE_ANON_KEY }}"
+        SUPABASE_KEY = SUPABASE_ANON_KEY
 
         # Scraper Configuration
         BASE_URL = "https://about---blank.com"
