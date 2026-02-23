@@ -63,10 +63,9 @@ class AboutBlankScraper:
     def __init__(self):
         self.db_manager = get_db_manager()
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-        self.existing_urls = self.db_manager.get_existing_product_urls("scraper")
 
     async def discover_product_urls(self) -> List[str]:
-        """Discover all product URLs from the shop-all collection."""
+        """Discover ALL product URLs from the shop-all collection (no filter by existing)."""
         logger.info("Starting product URL discovery...")
 
         product_urls = set()
@@ -83,23 +82,16 @@ class AboutBlankScraper:
             soup = BeautifulSoup(html, 'lxml')
             products_found_on_page = 0
 
-            # Find product links
-            product_links = soup.find_all('a', href=re.compile(r'/products/'))
-            logger.info(f"Found {len(product_links)} links with '/products/' on page {page}")
-
-            for link in product_links:
+            for link in soup.find_all('a', href=re.compile(r'/products/')):
                 href = link.get('href')
                 if href and '/products/' in href:
-                    if href.startswith('/'):
-                        full_url = urljoin(BASE_URL, href)
-                    else:
-                        full_url = href
+                    full_url = urljoin(BASE_URL, href) if href.startswith('/') else href
                     full_url = full_url.split('?')[0].split('#')[0]
-                    if full_url not in self.existing_urls:
+                    if full_url not in product_urls:
                         product_urls.add(full_url)
                         products_found_on_page += 1
 
-            logger.info(f"Found {products_found_on_page} new products on page {page}")
+            logger.info(f"Found {products_found_on_page} products on page {page}")
 
             next_page = soup.find('a', string=re.compile(r'next|Next|NEXT', re.I))
             if not next_page or products_found_on_page == 0:
@@ -113,19 +105,18 @@ class AboutBlankScraper:
                 logger.warning("Reached page limit (50), stopping discovery")
                 break
 
-        # If HTML returned no links (e.g. JS-only, bot block, or changed structure), use Shopify JSON API
         if not product_urls:
             logger.info("No product links in HTML; trying Shopify collection products.json...")
             try:
                 match = re.search(r'/collections/([^/?#]+)', SHOP_ALL_URL)
                 handle = match.group(1) if match else "shop-all"
-                discovered = _discover_via_shopify_json(BASE_URL, handle, self.existing_urls)
+                discovered = _discover_via_shopify_json(BASE_URL, handle, set())
                 product_urls = set(discovered)
                 logger.info(f"Shopify JSON fallback found {len(product_urls)} product URLs")
             except Exception as e:
                 logger.warning(f"Shopify JSON fallback error: {e}")
 
-        logger.info(f"Discovered {len(product_urls)} new product URLs")
+        logger.info(f"Discovered {len(product_urls)} product URLs in total")
         return list(product_urls)
 
     async def scrape_product(self, session: aiohttp.ClientSession, url: str) -> Optional[Dict[str, Any]]:
@@ -340,10 +331,118 @@ class AboutBlankScraper:
         return products
 
     def save_products_to_db(self, products: List[Dict[str, Any]]) -> int:
-        """Save products to database"""
+        """Legacy: insert all (no sync). Prefer sync_products_to_db for full sync."""
         logger.info(f"Saving {len(products)} products to database...")
-
         success_count = self.db_manager.insert_products_batch(products)
         logger.info(f"Saved {success_count}/{len(products)} products to database")
-
         return success_count
+
+    def sync_products_to_db(self, products: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Smart sync: insert new, skip same (don't replace), update only when truly changed,
+        delete only products not in catalog anymore (removed by brand, etc.).
+        Never delete all and replace with everything. Includes safety guard against mass deletion.
+        Returns dict with inserted, updated, skipped, deleted.
+        """
+        logger.info(f"Syncing {len(products)} scraped products to database...")
+
+        # Normalize URLs for comparison (avoid http/https, trailing slash mismatches between runs)
+        def _norm(u: str) -> str:
+            return _normalize_product_url(u) if u else ""
+
+        scraped_urls = {_norm(p.get("product_url")): p.get("product_url") for p in products if p.get("product_url")}
+        existing_list = self.db_manager.get_existing_products_for_sync("scraper")
+        existing_by_url_raw = {r["product_url"]: r for r in existing_list if r.get("product_url")}
+        existing_by_norm = {_norm(u): (u, r) for u, r in existing_by_url_raw.items()}
+
+        to_insert = []
+        to_update = []
+        skipped = 0
+        for p in products:
+            url = p.get("product_url")
+            if not url:
+                continue
+            norm_url = _norm(url)
+            if norm_url not in existing_by_norm:
+                to_insert.append(p)
+            else:
+                _, existing_row = existing_by_norm[norm_url]
+                if _scraped_equals_existing(existing_row, p):
+                    skipped += 1
+                else:
+                    to_update.append(p)
+
+        inserted = self.db_manager.insert_products_batch(to_insert) if to_insert else 0
+        updated = 0
+        if to_update:
+            updated = self.db_manager.insert_products_batch(to_update)
+
+        ids_to_delete = []
+        for norm_url, (orig_url, row) in existing_by_norm.items():
+            if norm_url not in scraped_urls:
+                ids_to_delete.append(row["id"])
+
+        # Safety: never delete (nearly) all products unless we have a comparable insert count.
+        # Prevents "automated run wipes DB" when scrape fails or returns empty/different URLs.
+        existing_count = len(existing_by_norm)
+        if ids_to_delete and len(ids_to_delete) >= max(1, int(0.9 * existing_count)):
+            if inserted < len(ids_to_delete) // 2:
+                logger.error(
+                    f"BLOCKED mass deletion: would delete {len(ids_to_delete)} products but only insert {inserted}. "
+                    "This suggests scrape failure or URL mismatch. No products deleted."
+                )
+                ids_to_delete = []
+                logger.warning(
+                    "If this is intentional (e.g. catalog emptied), temporarily disable this guard."
+                )
+
+        deleted = self.db_manager.delete_products_by_ids(ids_to_delete) if ids_to_delete else 0
+
+        logger.info(
+            f"Sync done: inserted={inserted}, updated={updated}, skipped={skipped}, deleted={deleted}"
+        )
+        return {"inserted": inserted, "updated": updated, "skipped": skipped, "deleted": deleted}
+
+
+def _norm(v: Any) -> Any:
+    """Normalize for equality: None, empty string, list/tuple."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v.strip() or None
+    if isinstance(v, (list, tuple)):
+        return tuple(_norm(x) for x in v) if v else None
+    return v
+
+
+def _normalize_product_url(url: str) -> str:
+    """Normalize product URL for comparison (avoid http/https, trailing slash mismatches)."""
+    if not url:
+        return url or ""
+    url = url.strip().rstrip("/")
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    return url
+
+
+def _scraped_equals_existing(existing: Dict[str, Any], scraped: Dict[str, Any]) -> bool:
+    """True if comparable fields are the same (no update needed). Ignores embeddings and created_at."""
+    compare_keys = [
+        "title", "description", "category", "gender", "price", "size",
+        "image_url", "additional_images", "metadata", "country", "second_hand", "sale", "other",
+    ]
+    for k in compare_keys:
+        ev = _norm(existing.get(k))
+        sv = _norm(scraped.get(k))
+        if ev != sv:
+            return False
+    if existing.get("tags") is not None or scraped.get("tags") is not None:
+        et = existing.get("tags")
+        st = scraped.get("tags")
+        if isinstance(et, list):
+            et = tuple(et) if et else None
+        if isinstance(st, list):
+            st = tuple(st) if st else None
+        if et != st:
+            return False
+    return True
