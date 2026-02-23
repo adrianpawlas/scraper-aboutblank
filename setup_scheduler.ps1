@@ -43,10 +43,10 @@ if (-not (Test-Path $scraperScript)) {
     exit 1
 }
 
-# Task parameters
+# Task parameters - use WorkingDirectory so CWD is project folder (belt-and-suspenders with explicit .env path in config.py)
 $taskName = "About Blank Fashion Scraper"
 $taskDescription = "Automatically scrape About Blank fashion products daily at midnight"
-$taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$scraperScript`" -LogFile `"$scriptDir\scheduled_run_`$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss')).log`""
+$taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$scraperScript`" -LogFile `"$scriptDir\scheduled_run_`$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss')).log`"" -WorkingDirectory $scriptDir
 $taskTrigger = New-ScheduledTaskTrigger -Daily -At "00:00"
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType InteractiveToken
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable

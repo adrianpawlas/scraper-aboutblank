@@ -1,7 +1,12 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv(override=False)
+# Load .env from project root (config.py's parent dir), NOT from CWD.
+# Task Scheduler runs with CWD often = System32; this ensures .env is found.
+_config_dir = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=_config_dir / ".env", override=False)
 
 # Supabase Configuration (PostgREST API)
 # Set SUPABASE_URL and SUPABASE_KEY in .env (or SUPABASE_ANON_KEY as fallback)
