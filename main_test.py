@@ -6,6 +6,7 @@ Test version of main scraper - limited to 5 products
 import asyncio
 import logging
 import sys
+from config import PRODUCT_LIMIT
 from scraper import AboutBlankScraper
 
 # Configure logging
@@ -22,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Main scraper execution - test version with limited products"""
-    logger.info("Starting About Blank scraper (TEST MODE - limited to 5 products)...")
+    limit = PRODUCT_LIMIT if PRODUCT_LIMIT > 0 else 5
+    logger.info(f"Starting About Blank scraper (TEST MODE - limited to {limit} products)...")
 
     try:
         # Initialize scraper
@@ -36,8 +38,9 @@ async def main():
             logger.info("No new products found to scrape")
             return
 
-        # Limit to 5 products for testing
-        test_urls = product_urls[:5]
+        # Limit products (PRODUCT_LIMIT from env; 0 = use 5 for this test script)
+        limit = PRODUCT_LIMIT if PRODUCT_LIMIT > 0 else 5
+        test_urls = product_urls[:limit]
         logger.info(f"Limited to {len(test_urls)} products for testing")
 
         # Scrape all products
@@ -48,11 +51,15 @@ async def main():
             logger.warning("No products were successfully scraped")
             return
 
-        # Save to database
-        saved_count = scraper.save_products_to_db(products)
+        # Sync to database
+        sync_result = scraper.sync_products_to_db(products)
 
         logger.info("Test scraping completed successfully!")
-        logger.info(f"Summary: {len(test_urls)} attempted, {len(products)} scraped, {saved_count} saved to DB")
+        logger.info(
+            f"Summary: {len(test_urls)} attempted, {len(products)} scraped | "
+            f"inserted={sync_result['inserted']}, updated={sync_result['updated']}, "
+            f"skipped={sync_result['skipped']}, deleted={sync_result['deleted']}"
+        )
 
         # Show sample product
         if products:

@@ -3,13 +3,14 @@
 Check what's in the database
 """
 
+from config import SOURCE
 from database import get_db_manager
 
 def check_database():
     db = get_db_manager()
 
-    # Get all existing URLs
-    urls = db.get_existing_product_urls("scraper")
+    # Get all existing URLs for this scraper's source
+    urls = db.get_existing_product_urls(SOURCE)
 
     print(f"Found {len(urls)} existing product URLs in database")
 

@@ -5,6 +5,7 @@ Test script to validate scraper components
 
 import asyncio
 import logging
+from config import SOURCE
 from database import get_db_manager
 from scraper import AboutBlankScraper
 from embedding import get_embedder
@@ -18,7 +19,7 @@ async def test_database_connection():
     try:
         db = get_db_manager()
         # Try to get existing URLs (this will test connection)
-        urls = db.get_existing_product_urls("scraper")
+        urls = db.get_existing_product_urls(SOURCE)
         logger.info(f"Database connection successful. Found {len(urls)} existing products.")
         return True
     except Exception as e:

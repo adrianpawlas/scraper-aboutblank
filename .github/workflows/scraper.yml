@@ -18,6 +18,7 @@ on:
 
 env:
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
   SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
 jobs:
@@ -32,6 +33,17 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
+
+    - name: Verify Supabase credentials
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      run: |
+        if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+          echo "ERROR: SUPABASE_URL or SUPABASE_KEY not set. Add them in Settings → Secrets → Actions."
+          exit 1
+        fi
+        echo "Supabase credentials present"
 
     - name: Install system dependencies
       run: |
@@ -52,64 +64,20 @@ jobs:
         pip install sentencepiece protobuf
         pip install -r requirements.txt
 
-    - name: Create config file
-      run: |
-        cat > config.py << EOF
-        import os
-        from dotenv import load_dotenv
-
-        load_dotenv(override=False)
-
-        SUPABASE_URL = ("${{ secrets.SUPABASE_URL }}" or "").rstrip("/")
-        SUPABASE_ANON_KEY = "${{ secrets.SUPABASE_ANON_KEY }}"
-        SUPABASE_KEY = SUPABASE_ANON_KEY
-
-        # Scraper Configuration
-        BASE_URL = "https://about---blank.com"
-        SHOP_ALL_URL = f"{BASE_URL}/collections/shop-all"
-        HEADERS = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-
-        # Data Mapping Configuration
-        BRAND = "About Blank"
-        SOURCE = "scraper"
-        COUNTRY = "US"
-        CURRENCY = "USD"
-
-        # Category mapping
-        CATEGORY_MAPPING = {
-            'clothes': ['t-shirts', 'hoodies & sweats', 'knitwear', 'outerwear', 'shirts', 'vests'],
-            'accessories': ['accessories', 'headwear'],
-            'footwear': []
-        }
-
-        # Rate limiting
-        REQUESTS_PER_SECOND = 2
-        MAX_CONCURRENT_REQUESTS = 5
-
-        # Image processing
-        EMBEDDING_MODEL = "google/siglip-base-patch16-384"
-        EMBEDDING_DIM = 768
-        EOF
-
     - name: Run scraper
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        PRODUCT_LIMIT: ${{ github.event.inputs.mode == 'test' && '10' || '0' }}
       run: |
         if [ "${{ github.event.inputs.mode }}" = "test" ]; then
-          echo "Running in test mode..."
+          echo "Running in test mode (PRODUCT_LIMIT=10)..."
           python main_test.py
         else
           echo "Running full scraper..."
           python main.py
         fi
-      env:
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
     - name: Upload logs
       if: always()

@@ -1,6 +1,6 @@
 """
 Supabase import via PostgREST REST API (HTTP), no Supabase JS client.
-Upsert with resolution=merge-duplicates; normalized keys per batch; chunked requests.
+Smart sync: use resolution=ignore-duplicates (insert new, leave existing unchanged), then delete stale.
 """
 import json
 import logging
@@ -76,6 +76,66 @@ class SupabaseManager:
             logger.error(f"Error getting existing product URLs: {e}")
             return set()
 
+    # Columns we compare to decide if a row is "same" as scraped (no update needed)
+    SYNC_COMPARE_COLUMNS = (
+        "id", "source", "product_url", "image_url", "additional_images", "brand", "title",
+        "description", "category", "gender", "price", "size", "metadata", "tags",
+        "country", "second_hand", "sale", "other",
+    )
+
+    def get_existing_products_for_sync(self, source: str) -> List[Dict[str, Any]]:
+        """Fetch existing rows for source for sync: id, product_url, and comparable columns."""
+        try:
+            collected: List[Dict[str, Any]] = []
+            offset = 0
+            limit = 500
+            select = "id,product_url,title,description,category,gender,price,size,image_url,additional_images,metadata,tags,country,second_hand,sale,other"
+            while True:
+                r = self.session.get(
+                    f"{self.base_url}/products",
+                    params={
+                        "select": select,
+                        "source": f"eq.{source}",
+                        "limit": limit,
+                        "offset": offset,
+                    },
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if not data:
+                    break
+                collected.extend(data)
+                if len(data) < limit:
+                    break
+                offset += limit
+            return collected
+        except Exception as e:
+            logger.error(f"Error getting existing products for sync: {e}")
+            return []
+
+    def delete_products_by_ids(self, ids: List[str]) -> int:
+        """Delete rows by id. PostgREST: DELETE with id=in.(id1,id2,...). Batched."""
+        if not ids:
+            return 0
+        deleted = 0
+        chunk = 100
+        for i in range(0, len(ids), chunk):
+            batch = ids[i : i + chunk]
+            try:
+                # PostgREST: id=in.(id1,id2,...) — UUIDs in parens, comma-separated
+                in_val = "in.(" + ",".join(batch) + ")"
+                r = self.session.delete(
+                    f"{self.base_url}/products",
+                    params={"id": in_val},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                deleted += len(batch)
+            except Exception as e:
+                logger.error(f"Error deleting batch: {e}")
+        return deleted
+
     def _normalize_batch(self, products_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Ensure every object has the same set of keys (PostgREST requirement). Use None for missing."""
         all_keys: set = set()
@@ -95,14 +155,27 @@ class SupabaseManager:
                 out[k] = v
         return out
 
-    def insert_products_batch(self, products_data: List[Dict[str, Any]]) -> int:
-        """Upsert products in chunks via PostgREST. Normalizes keys per batch; uses merge-duplicates."""
+    def insert_products_batch(
+        self,
+        products_data: List[Dict[str, Any]],
+        *,
+        ignore_duplicates: bool = True,
+    ) -> int:
+        """
+        Insert products in chunks. By default uses resolution=ignore-duplicates:
+        new rows are inserted, existing rows (by unique constraint) are left unchanged.
+        Set ignore_duplicates=False to use merge-duplicates (update on conflict).
+        """
         if not products_data:
             return 0
 
         normalized = self._normalize_batch(products_data)
         endpoint = f"{self.base_url}/products"
-        prefer = "resolution=merge-duplicates,return=minimal"
+        prefer = (
+            "resolution=ignore-duplicates,return=minimal"
+            if ignore_duplicates
+            else "resolution=merge-duplicates,return=minimal"
+        )
         success_count = 0
 
         for i in range(0, len(normalized), UPSERT_CHUNK_SIZE):
@@ -132,7 +205,7 @@ class SupabaseManager:
                         if rr.status_code in (200, 201, 204):
                             success_count += 1
                         else:
-                            logger.error(f"Row failed: {rr.status_code} {rr.text[:200]} title={row.get('title')}")
+                            logger.error(f"Row failed: {rr.status_code} {r.text[:200]} title={row.get('title')}")
             except Exception as e:
                 logger.error(f"Chunk request error: {e}; retrying row-by-row")
                 for row in chunk_prepared:

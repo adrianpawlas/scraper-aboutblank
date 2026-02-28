@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin
 from typing import List, Dict, Any, Optional
-from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS
+from config import BASE_URL, SHOP_ALL_URL, HEADERS, REQUESTS_PER_SECOND, MAX_CONCURRENT_REQUESTS, SOURCE
 from utils import (
     generate_product_id, clean_text, extract_sizes,
     extract_categories_from_page, extract_prices_with_currencies,
@@ -191,8 +191,8 @@ class AboutBlankScraper:
                 }
 
                 product_data = {
-                    'id': generate_product_id('scraper', url),
-                    'source': 'scraper',
+                    'id': generate_product_id(SOURCE, url),
+                    'source': SOURCE,
                     'product_url': url,
                     'image_url': image_url,
                     'additional_images': additional_images,
@@ -339,52 +339,25 @@ class AboutBlankScraper:
 
     def sync_products_to_db(self, products: List[Dict[str, Any]]) -> Dict[str, int]:
         """
-        Smart sync: insert new, skip same (don't replace), update only when truly changed,
-        delete only products not in catalog anymore (removed by brand, etc.).
-        Never delete all and replace with everything. Includes safety guard against mass deletion.
-        Returns dict with inserted, updated, skipped, deleted.
+        Smart sync (per guide): insert new (ignore-duplicates so existing rows stay unchanged),
+        then delete only products for this source that are no longer in the catalog.
+        Never delete all and replace. Includes safety guard against mass deletion.
         """
-        logger.info(f"Syncing {len(products)} scraped products to database...")
+        logger.info(f"Syncing {len(products)} scraped products to database (source={SOURCE})...")
 
-        # Normalize URLs for comparison (avoid http/https, trailing slash mismatches between runs)
-        def _norm(u: str) -> str:
-            return _normalize_product_url(u) if u else ""
+        # 1) Upsert with ignore-duplicates: new rows inserted, existing left unchanged
+        inserted = self.db_manager.insert_products_batch(products, ignore_duplicates=True) if products else 0
 
-        scraped_urls = {_norm(p.get("product_url")): p.get("product_url") for p in products if p.get("product_url")}
-        existing_list = self.db_manager.get_existing_products_for_sync("scraper")
-        existing_by_url_raw = {r["product_url"]: r for r in existing_list if r.get("product_url")}
-        existing_by_norm = {_norm(u): (u, r) for u, r in existing_by_url_raw.items()}
+        # 2) Get existing product IDs for this source
+        existing_list = self.db_manager.get_existing_products_for_sync(SOURCE)
+        existing_ids = {r["id"] for r in existing_list if r.get("id")}
+        current_ids = {p["id"] for p in products if p.get("id")}
 
-        to_insert = []
-        to_update = []
-        skipped = 0
-        for p in products:
-            url = p.get("product_url")
-            if not url:
-                continue
-            norm_url = _norm(url)
-            if norm_url not in existing_by_norm:
-                to_insert.append(p)
-            else:
-                _, existing_row = existing_by_norm[norm_url]
-                if _scraped_equals_existing(existing_row, p):
-                    skipped += 1
-                else:
-                    to_update.append(p)
+        # 3) Delete only rows for this source that are not in current scrape (stale/removed from catalog)
+        ids_to_delete = [i for i in existing_ids if i not in current_ids]
 
-        inserted = self.db_manager.insert_products_batch(to_insert) if to_insert else 0
-        updated = 0
-        if to_update:
-            updated = self.db_manager.insert_products_batch(to_update)
-
-        ids_to_delete = []
-        for norm_url, (orig_url, row) in existing_by_norm.items():
-            if norm_url not in scraped_urls:
-                ids_to_delete.append(row["id"])
-
-        # Safety: never delete (nearly) all products unless we have a comparable insert count.
-        # Prevents "automated run wipes DB" when scrape fails or returns empty/different URLs.
-        existing_count = len(existing_by_norm)
+        # Safety: never delete (nearly) all products unless we have a comparable insert count
+        existing_count = len(existing_ids)
         if ids_to_delete and len(ids_to_delete) >= max(1, int(0.9 * existing_count)):
             if inserted < len(ids_to_delete) // 2:
                 logger.error(
@@ -398,10 +371,8 @@ class AboutBlankScraper:
 
         deleted = self.db_manager.delete_products_by_ids(ids_to_delete) if ids_to_delete else 0
 
-        logger.info(
-            f"Sync done: inserted={inserted}, updated={updated}, skipped={skipped}, deleted={deleted}"
-        )
-        return {"inserted": inserted, "updated": updated, "skipped": skipped, "deleted": deleted}
+        logger.info(f"Sync done: inserted={inserted}, deleted={deleted} (existing unchanged)")
+        return {"inserted": inserted, "updated": 0, "skipped": len(existing_ids) - len(ids_to_delete), "deleted": deleted}
 
 
 def _norm(v: Any) -> Any:

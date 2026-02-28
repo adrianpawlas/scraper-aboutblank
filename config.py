@@ -3,10 +3,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from project root (config.py's parent dir), NOT from CWD.
-# Task Scheduler runs with CWD often = System32; this ensures .env is found.
-_config_dir = Path(__file__).resolve().parent
-load_dotenv(dotenv_path=_config_dir / ".env", override=False)
+
+def load_env():
+    """Load .env from project root so cron/scheduled/CI runs find it. Call when config is first loaded."""
+    project_root = Path(__file__).resolve().parent
+    load_dotenv(project_root / ".env", override=False)
+
+
+# Load .env from project root before reading env vars (fixes automated runs with different CWD)
+load_env()
 
 # Supabase Configuration (PostgREST API)
 # Set SUPABASE_URL and SUPABASE_KEY in .env (or SUPABASE_ANON_KEY as fallback)
@@ -29,7 +34,8 @@ HEADERS = {
 
 # Data Mapping Configuration
 BRAND = "About Blank"
-SOURCE = "scraper"
+# Unique source per scraper so multiple scrapers don't delete each other's rows
+SOURCE = "about_blank"
 COUNTRY = "US"
 CURRENCY = "USD"
 
@@ -43,6 +49,9 @@ CATEGORY_MAPPING = {
 # Rate limiting
 REQUESTS_PER_SECOND = 2  # Conservative rate limiting
 MAX_CONCURRENT_REQUESTS = 5
+
+# 0 = no limit; set PRODUCT_LIMIT in env for test/CI (e.g. 10)
+PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT", "0"))
 
 # Image processing
 EMBEDDING_MODEL = "google/siglip-base-patch16-384"
