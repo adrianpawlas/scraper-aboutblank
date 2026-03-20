@@ -52,7 +52,7 @@ async def main():
             return
 
         # Sync to database
-        sync_result = scraper.sync_products_to_db(products)
+        sync_result = await scraper.sync_products_to_db(products)
 
         logger.info("Test scraping completed successfully!")
         logger.info(

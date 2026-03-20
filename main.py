@@ -46,11 +46,15 @@ async def main():
             logger.warning("No products were successfully scraped")
             return
 
-        # Save to database
-        saved_count = scraper.save_products_to_db(products)
+        # Sync to database (insert new, update changed, skip same, delete missing)
+        sync_result = await scraper.sync_products_to_db(products)
 
         logger.info("Scraping completed successfully!")
-        logger.info(f"Summary: {len(product_urls)} discovered, {len(products)} scraped, {saved_count} saved to DB")
+        logger.info(
+            f"Summary: {len(product_urls)} discovered, {len(products)} scraped | "
+            f"inserted={sync_result['inserted']}, updated={sync_result['updated']}, "
+            f"skipped={sync_result['skipped']}, deleted={sync_result['deleted']}"
+        )
 
     except Exception as e:
         logger.error(f"Fatal error during scraping: {e}")

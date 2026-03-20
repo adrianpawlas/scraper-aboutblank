@@ -54,7 +54,6 @@ def extract_prices_with_currencies(soup):
     Normalizes cents to dollars for USD/EUR/GBP. Ensures at least USD or EUR.
     """
     import json
-    # Priority order: JSON-LD (display) first, then visible, then script. One value per currency.
     by_currency = {}
 
     def add(val, c):
@@ -62,39 +61,48 @@ def extract_prices_with_currencies(soup):
         val = _normalize_price_value(val, c)
         if c not in by_currency:
             by_currency[c] = val
-        # Prefer value that looks like display (not huge); keep first from higher-priority source
         elif val < 10000 and by_currency[c] > 10000:
             by_currency[c] = val
 
-    # 1) JSON-LD (most reliable display price)
+    def extract_offers(product_data):
+        """Extract price and currency from Product or Offer dict"""
+        offers = product_data.get('offers')
+        if isinstance(offers, dict):
+            offers = [offers]
+        for o in (offers or []):
+            if not isinstance(o, dict):
+                continue
+            p = o.get('price')
+            c = (o.get('priceCurrency') or 'USD').upper()[:3]
+            if p is not None:
+                try:
+                    add(float(p), c)
+                except (TypeError, ValueError):
+                    pass
+
+    # 1) JSON-LD (most reliable display price) - handle both Product and ProductGroup
     for script in soup.find_all('script', type='application/ld+json'):
         try:
             data = json.loads(script.string or '{}')
-            if isinstance(data, dict) and data.get('@type') == 'Product':
-                offers = data.get('offers')
-                if isinstance(offers, dict):
-                    offers = [offers]
-                for o in (offers or []):
-                    if not isinstance(o, dict):
-                        continue
-                    p, c = o.get('price'), (o.get('priceCurrency') or 'USD').upper()[:3]
-                    if p is not None:
-                        try:
-                            add(float(p), c)
-                        except (TypeError, ValueError):
-                            pass
-            if isinstance(data, list):
+            
+            def process_product(product_data):
+                if not isinstance(product_data, dict):
+                    return
+                product_type = product_data.get('@type')
+                if product_type == 'Product':
+                    extract_offers(product_data)
+                elif product_type == 'ProductGroup':
+                    has_variant = product_data.get('hasVariant', [])
+                    if isinstance(has_variant, list):
+                        for variant in has_variant:
+                            if isinstance(variant, dict):
+                                extract_offers(variant)
+
+            if isinstance(data, dict):
+                process_product(data)
+            elif isinstance(data, list):
                 for g in data:
-                    if isinstance(g, dict) and g.get('@type') == 'Product':
-                        for o in (g.get('offers') or []) if isinstance(g.get('offers'), list) else ([g.get('offers')] if isinstance(g.get('offers'), dict) else []):
-                            if not isinstance(o, dict):
-                                continue
-                            p, c = o.get('price'), (o.get('priceCurrency') or 'USD').upper()[:3]
-                            if p is not None:
-                                try:
-                                    add(float(p), c)
-                                except (TypeError, ValueError):
-                                    pass
+                    process_product(g)
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -138,10 +146,17 @@ def extract_prices_with_currencies(soup):
 
     if not by_currency:
         return None
-    has_usd_eur = any(c in ('USD', 'EUR') for c in by_currency)
-    if not has_usd_eur:
-        first_val = next(iter(by_currency.values()))
-        by_currency['USD'] = _normalize_price_value(first_val, 'USD')
+    # Ensure EUR is always present for downstream requirements.
+    if 'EUR' not in by_currency:
+        if 'USD' in by_currency:
+            by_currency['EUR'] = _normalize_price_value(by_currency['USD'], 'EUR')
+        else:
+            first_val = next(iter(by_currency.values()))
+            by_currency['EUR'] = _normalize_price_value(first_val, 'EUR')
+
+    # Keep backward compatibility for consumers that expect USD.
+    if 'USD' not in by_currency:
+        by_currency['USD'] = _normalize_price_value(by_currency['EUR'], 'USD')
     parts = [f"{int(v) if v == int(v) else v}{c}" for c, v in sorted(by_currency.items())]
     return ", ".join(parts)
 

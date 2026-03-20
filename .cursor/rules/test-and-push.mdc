@@ -1,0 +1,18 @@
+---
+description: After making changes, run local test and push to GitHub when it passes
+alwaysApply: true
+---
+
+# Test and push after changes
+
+When you change scraper, database, config, or utils code:
+
+1. **Run the local test** so the change is verified before push:
+   - `python main_test.py` (5 products, real Supabase; ensure `.env` has `SUPABASE_URL` and `SUPABASE_KEY` if needed).
+   - Or `python run_local_test.py` for a quick run with mocked DB (no Supabase).
+
+2. **If the test passes**, commit and push to GitHub:
+   - Stage the changed files, commit with a clear message, then `git push origin master`.
+   - Remove `.git/index.lock` if git reports it (e.g. `Remove-Item -Force .git\index.lock`).
+
+Do not leave the user to ask again to "test and push"; do it as part of finishing the change.

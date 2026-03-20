@@ -35,7 +35,7 @@ HEADERS = {
 # Data Mapping Configuration
 BRAND = "About Blank"
 # Unique source per scraper so multiple scrapers don't delete each other's rows
-SOURCE = "about_blank"
+SOURCE = "scraper-aboutblank"
 COUNTRY = "US"
 CURRENCY = "USD"
 
