@@ -6,10 +6,11 @@ from database import DatabaseService
 from config import SOURCE, CATEGORY_URLS
 
 
-async def main(test_mode=False, test_count=3):
+async def main(test_mode=False, test_count=3, skip_embeddings=False):
     print("=" * 60)
     print("About Blank Scraper Starting")
     print(f"Source: {SOURCE}")
+    print(f"Skip embeddings: {skip_embeddings}")
     print("=" * 60)
 
     scraper = ProductScraper()
@@ -24,35 +25,19 @@ async def main(test_mode=False, test_count=3):
         print(f"\n[TEST] Limiting to {test_count} products for testing...")
         products = products[:test_count]
 
-    print("\n[2/3] Inserting products into Supabase...")
+    print("\n[2/3] Processing and upserting products...")
+    results = db.process_products(products)
+
+    print("\n[3/3] Run Summary:")
+    print(f"  ✓ {results.get('new', 0)} new products added")
+    print(f"  ✓ {results.get('updated', 0)} products updated")
+    print(f"  ○ {results.get('skipped', 0)} products unchanged (skipped)")
+    print(f"  ✓ {results.get('stale_deleted', 0)} stale products deleted")
     
-    # Insert one by one to ensure proper logging
-    inserted = 0
-    failed = 0
-    errors = []
-    
-    for product in products:
-        try:
-            result = db.insert_products([product])
-            if result['inserted'] > 0:
-                inserted += 1
-                print(f"  ✓ {product.get('title', 'unknown')}")
-            else:
-                failed += 1
-                errors.extend(result['errors'])
-                print(f"  ✗ {product.get('title', 'unknown')}: {result['errors']}")
-        except Exception as e:
-            failed += 1
-            errors.append(str(e))
-            print(f"  ✗ {product.get('title', 'unknown')}: {e}")
+    if results.get('failed', 0) > 0:
+        print(f"  ✗ {results.get('failed', 0)} products failed")
 
-    results = {"inserted": inserted, "failed": failed, "errors": errors}
-
-    print("\n[3/3] Results:")
-    print(f"  - Inserted: {results['inserted']}")
-    print(f"  - Failed: {results['failed']}")
-
-    if results['errors']:
+    if results.get('errors'):
         print(f"\nErrors ({len(results['errors'])}):")
         for err in results['errors'][:3]:
             print(f"  - {err}")
@@ -61,14 +46,16 @@ async def main(test_mode=False, test_count=3):
     print("Scraping Complete!")
     print("=" * 60)
     
-    return results['inserted'] > 0 and results['failed'] == 0
+    total_changes = results.get('new', 0) + results.get('updated', 0) + results.get('stale_deleted', 0)
+    return total_changes > 0 or results.get('failed', 0) == 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='About Blank Scraper')
     parser.add_argument('--test', action='store_true', help='Run in test mode (limited products)')
     parser.add_argument('--count', type=int, default=3, help='Number of products in test mode')
+    parser.add_argument('--skip-embeddings', action='store_true', help='Skip generating embeddings for existing products')
     args = parser.parse_args()
     
-    success = asyncio.run(main(test_mode=args.test, test_count=args.count))
+    success = asyncio.run(main(test_mode=args.test, test_count=args.count, skip_embeddings=args.skip_embeddings))
     sys.exit(0 if success else 1)

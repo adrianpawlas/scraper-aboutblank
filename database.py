@@ -1,19 +1,20 @@
 import supabase
-from config import SUPABASE_URL, SUPABASE_KEY, SOURCE
+import time
+import logging
 from datetime import datetime
+from config import SUPABASE_URL, SUPABASE_KEY, SOURCE
 
+logging.basicConfig(filename='scraper_errors.log', level=logging.ERROR)
 
 class DatabaseService:
     def __init__(self):
         self.client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
+        self.batch_size = 50
         print("DatabaseService initialized")
 
     def generate_product_id(self, product_url: str) -> str:
         url_part = product_url.split("/products/")[-1].split("?")[0] if "/products/" in product_url else product_url
         return f"{SOURCE}_{url_part}"
-
-    def format_price(self, price_str: str) -> str:
-        return price_str.strip() if price_str else None
 
     def format_additional_images(self, images: list) -> str:
         if not images:
@@ -25,7 +26,7 @@ class DatabaseService:
             return None
         return ", ".join(categories)
 
-    def prepare_product_data(self, product: dict) -> dict:
+    def prepare_product_data(self, product: dict, is_new: bool = False, image_changed: bool = False) -> dict:
         categories = product.get("categories", [])
         additional_images = product.get("additional_images", [])
         metadata = product.get("metadata", {})
@@ -35,7 +36,7 @@ class DatabaseService:
             if amount:
                 price_parts.append(f"{amount}{currency}")
 
-        return {
+        data = {
             "id": self.generate_product_id(product["product_url"]),
             "source": SOURCE,
             "product_url": product["product_url"],
@@ -46,48 +47,164 @@ class DatabaseService:
             "description": product.get("description"),
             "category": self.format_categories(categories),
             "gender": product.get("gender"),
-            "created_at": datetime.utcnow().isoformat(),
             "metadata": str(metadata) if metadata else None,
             "size": product.get("size"),
             "second_hand": False,
-            "image_embedding": product.get("image_embedding"),
-            "country": metadata.get("country"),
-            "compressed_image_url": product.get("compressed_image_url"),
-            "tags": product.get("tags"),
             "price": ", ".join(price_parts) if price_parts else None,
             "sale": ", ".join(price_parts) if price_parts and metadata.get("on_sale") else None,
             "additional_images": self.format_additional_images(additional_images),
-            "info_embedding": product.get("info_embedding"),
         }
+        
+        if is_new:
+            data["created_at"] = datetime.utcnow().isoformat()
+        
+        if is_new or image_changed:
+            data["image_embedding"] = product.get("image_embedding")
+            data["info_embedding"] = product.get("info_embedding")
+        
+        return data
 
-    def insert_products(self, products: list) -> dict:
-        results = {"inserted": 0, "failed": 0, "errors": []}
+    def get_existing_products(self, product_urls: list[str]) -> dict:
+        if not product_urls:
+            return {}
+        
+        result = self.client.table("products").select(
+            "id, product_url, title, price, image_url, category, metadata, additional_images"
+        ).in_("product_url", product_urls).execute()
+        
+        return {p["product_url"]: p for p in result.data}
 
-        for product in products:
-            try:
-                product_data = self.prepare_product_data(product)
-                result = self.client.table("products").upsert(product_data, on_conflict="id").execute()
-                if result.data:
-                    results["inserted"] += 1
-                else:
-                    results["failed"] += 1
-                    results["errors"].append(f"No data returned for {product.get('title', 'unknown')}")
-            except Exception as e:
-                results["failed"] += 1
-                results["errors"].append(str(e))
-                print(f"Failed to insert product {product.get('title', 'unknown')}: {e}")
+    def has_changed(self, existing: dict, new_product: dict) -> bool:
+        if not existing:
+            return True
+        
+        existing_title = existing.get("title") or ""
+        new_title = new_product.get("title") or ""
+        if existing_title != new_title:
+            return True
+            
+        if existing.get("price") != self._format_price(new_product):
+            return True
+        if existing.get("image_url") != new_product.get("image_url"):
+            return True
+        if existing.get("category") != self._format_categories(new_product.get("categories", [])):
+            return True
+        existing_addl = existing.get("additional_images") or ""
+        new_addl = self.format_additional_images(new_product.get("additional_images", [])) or ""
+        if existing_addl != new_addl:
+            return True
+        return False
 
+    def _format_price(self, product: dict) -> str:
+        metadata = product.get("metadata", {})
+        price_parts = []
+        for currency, amount in metadata.get("prices", {}).items():
+            if amount:
+                price_parts.append(f"{amount}{currency}")
+        return ", ".join(price_parts) if price_parts else None
+
+    def _format_categories(self, categories: list) -> str:
+        return ", ".join(categories) if categories else None
+
+    def batch_upsert(self, products: list[dict]) -> dict:
+        results = {"inserted": 0, "updated": 0, "skipped": 0, "failed": 0, "errors": []}
+        
+        for i in range(0, len(products), self.batch_size):
+            batch = products[i:i + self.batch_size]
+            retry_count = 0
+            max_retries = 3
+            
+            while retry_count < max_retries:
+                try:
+                    batch_data = [p for p in batch if p is not None]
+                    if not batch_data:
+                        continue
+                        
+                    result = self.client.table("products").upsert(
+                        batch_data, 
+                        on_conflict="id",
+                        ignore_duplicates=False
+                    ).execute()
+                    
+                    if result.data:
+                        results["inserted"] += len([p for p in batch if p.get("_is_new", False)])
+                        results["updated"] += len([p for p in batch if not p.get("_is_new", True) and p.get("_changed", False)])
+                        results["skipped"] += len([p for p in batch if not p.get("_changed", True) and not p.get("_is_new", True)])
+                    break
+                    
+                except Exception as e:
+                    retry_count += 1
+                    error_msg = str(e)
+                    if retry_count >= max_retries:
+                        results["failed"] += len(batch)
+                        results["errors"].append(f"Batch {i // self.batch_size + 1} failed after {max_retries} retries: {error_msg}")
+                        logging.error(f"Batch insert failed: {error_msg}")
+                        for p in batch:
+                            if p:
+                                logging.error(f"Failed product: {p.get('title', 'unknown')}")
+                    else:
+                        time.sleep(1 * retry_count)
+        
         return results
 
-    def batch_insert(self, products: list, batch_size: int = 50) -> dict:
-        total_results = {"inserted": 0, "failed": 0, "errors": []}
+    def delete_stale_products(self, seen_product_urls: list[str]) -> dict:
+        if not seen_product_urls:
+            return {"deleted": 0}
+        
+        try:
+            result = self.client.table("products").select("product_url").eq("source", SOURCE).execute()
+            all_products = result.data or []
+            
+            stale_urls = [p["product_url"] for p in all_products if p["product_url"] not in seen_product_urls]
+            
+            if stale_urls:
+                delete_result = self.client.table("products").delete().in_("product_url", stale_urls).execute()
+                return {"deleted": len(stale_urls)}
+            
+            return {"deleted": 0}
+            
+        except Exception as e:
+            logging.error(f"Error deleting stale products: {e}")
+            return {"deleted": 0, "error": str(e)}
 
-        for i in range(0, len(products), batch_size):
-            batch = products[i:i + batch_size]
-            batch_results = self.insert_products(batch)
-            total_results["inserted"] += batch_results["inserted"]
-            total_results["failed"] += batch_results["failed"]
-            total_results["errors"].extend(batch_results["errors"])
-            print(f"Batch {i // batch_size + 1}: Inserted {batch_results['inserted']}, Failed {batch_results['failed']}")
-
-        return total_results
+    def process_products(self, products: list[dict]) -> dict:
+        seen_urls = [p["product_url"] for p in products]
+        existing_products = self.get_existing_products(seen_urls)
+        
+        products_to_upsert = []
+        
+        for product in products:
+            product_url = product["product_url"]
+            existing = existing_products.get(product_url)
+            
+            is_new = existing is None
+            image_changed = existing and existing.get("image_url") != product.get("image_url")
+            changed = self.has_changed(existing, product)
+            
+            if is_new:
+                product["_is_new"] = True
+                product["_changed"] = True
+                prepared = self.prepare_product_data(product, is_new=True, image_changed=True)
+            elif changed:
+                product["_is_new"] = False
+                product["_changed"] = True
+                prepared = self.prepare_product_data(product, is_new=False, image_changed=image_changed)
+            else:
+                product["_is_new"] = False
+                product["_changed"] = False
+                prepared = self.prepare_product_data(product, is_new=False, image_changed=False)
+            
+            products_to_upsert.append(prepared)
+        
+        insert_results = self.batch_upsert(products_to_upsert)
+        
+        delete_results = self.delete_stale_products(seen_urls)
+        
+        return {
+            "new": insert_results["inserted"],
+            "updated": insert_results["updated"],
+            "skipped": insert_results["skipped"],
+            "failed": insert_results["failed"],
+            "stale_deleted": delete_results.get("deleted", 0),
+            "errors": insert_results["errors"]
+        }

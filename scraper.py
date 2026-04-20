@@ -1,6 +1,7 @@
 import re
 import json
 import asyncio
+import time
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from config import BASE_URL, CATEGORY_URLS, PRODUCT_URLS
 from embedding_service import EmbeddingService
@@ -337,7 +338,7 @@ class ProductScraper:
 
         return info
 
-    async def scrape_product(self, url: str) -> dict:
+    async def scrape_product(self, url: str, generate_embeddings: bool = True) -> dict:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
@@ -348,8 +349,9 @@ class ProductScraper:
 
                 product_info = await self.extract_product_info(page, url)
 
-                if product_info.get("image_url"):
+                if product_info.get("image_url") and generate_embeddings:
                     try:
+                        time.sleep(0.5)
                         product_info["image_embedding"] = self.embedding_service.get_image_embedding(
                             product_info["image_url"]
                         )
@@ -364,6 +366,7 @@ class ProductScraper:
                     
                     info_text = f"{product_info.get('title', '')} {product_info.get('description', '')} {', '.join(product_info.get('categories', []))} {product_info.get('gender', '')} {sizes} {colors} {prices}"
                     try:
+                        time.sleep(0.5)
                         product_info["info_embedding"] = self.embedding_service.get_text_embedding(info_text)
                     except Exception as e:
                         print(f"Error generating info embedding for {url}: {e}")
@@ -377,13 +380,13 @@ class ProductScraper:
                 await browser.close()
                 return None
 
-    async def scrape_all_products(self, urls: list[str]) -> list[dict]:
+    async def scrape_all_products(self, urls: list[str], generate_embeddings: bool = True) -> list[dict]:
         all_products = []
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
 
-            for url in urls:
+            for i, url in enumerate(urls):
                 page = await browser.new_page()
                 try:
                     await page.goto(url, timeout=60000)
@@ -391,8 +394,9 @@ class ProductScraper:
 
                     product_info = await self.extract_product_info(page, url)
 
-                    if product_info.get("image_url"):
+                    if product_info.get("image_url") and generate_embeddings:
                         try:
+                            time.sleep(0.5)
                             product_info["image_embedding"] = self.embedding_service.get_image_embedding(
                                 product_info["image_url"]
                             )
@@ -407,6 +411,7 @@ class ProductScraper:
                         
                         info_text = f"{product_info.get('title', '')} {product_info.get('description', '')} {', '.join(product_info.get('categories', []))} {product_info.get('gender', '')} {sizes} {colors} {prices}"
                         try:
+                            time.sleep(0.5)
                             product_info["info_embedding"] = self.embedding_service.get_text_embedding(info_text)
                         except Exception as e:
                             print(f"Error generating info embedding for {url}: {e}")
