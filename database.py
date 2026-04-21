@@ -3,7 +3,6 @@ import time
 import logging
 from datetime import datetime
 from config import SUPABASE_URL, SUPABASE_KEY, SOURCE
-from image_compression import ImageCompressionService
 
 logging.basicConfig(filename='scraper_errors.log', level=logging.ERROR)
 
@@ -11,7 +10,6 @@ class DatabaseService:
     def __init__(self):
         self.client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
         self.batch_size = 50
-        self.compressor = ImageCompressionService()
         print("DatabaseService initialized")
 
     def generate_product_id(self, product_url: str) -> str:
@@ -44,7 +42,6 @@ class DatabaseService:
             "product_url": product["product_url"],
             "affiliate_url": product.get("affiliate_url"),
             "image_url": product.get("image_url"),
-            "compressed_image_url": product.get("compressed_image_url"),
             "brand": product.get("brand", "About Blank"),
             "title": product.get("title"),
             "description": product.get("description"),
@@ -182,17 +179,7 @@ class DatabaseService:
             
             is_new = existing is None
             image_changed = existing and existing.get("image_url") != product.get("image_url")
-            needs_compression = is_new or image_changed or (existing and not existing.get("compressed_image_url"))
             changed = self.has_changed(existing, product)
-            
-            compressed_url = None
-            if needs_compression and product.get("image_url"):
-                print(f"Compressing image for: {product.get('title', 'unknown')}")
-                compressed_url = self.compressor.compress_image(product.get("image_url"))
-            elif existing:
-                compressed_url = existing.get("compressed_image_url")
-            
-            product["compressed_image_url"] = compressed_url
             
             if is_new:
                 product["_is_new"] = True
